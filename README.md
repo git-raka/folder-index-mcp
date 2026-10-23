@@ -31,6 +31,7 @@ Without an index, an agent has to run `ls` and `grep` and open PDFs one by one, 
 | `find_duplicates` | Byte-identical documents, largest waste first |
 | `index_status` | Counts, last update, whether a refresh is running |
 | `refresh_index` | Starts an incremental re-index in the background |
+| `ocr_speed` | Switches OCR between `background` (1 low-priority worker), `turbo` (parallel, all cores but one) and `pause` |
 
 When the server starts, it refreshes the index in a detached background process if the last update is more than 15 minutes old. That keeps the index current without a scheduler.
 
@@ -82,6 +83,27 @@ After every `update`, PDFs with no text layer and images of at least 30 KB outsi
 folder-index --root "C:\Users\me\Downloads" ocr --limit 50
 folder-index --root "C:\Users\me\Downloads" status   # shows OCR progress
 ```
+
+#### Speed modes
+
+OCR is CPU-bound: each page is rendered to an image and then recognised, and one process uses one core. To finish a big backlog fast, switch to **turbo**. It runs one worker process per CPU core minus one, each with its own OCR engine, at normal priority. The worker count is capped by free RAM at about 350 MB per worker.
+
+| Mode | Workers | Priority | Use it when |
+|---|---|---|---|
+| `background` | 1 | below normal | default after every update; you won't notice it |
+| `turbo` | cores − 1, RAM-capped | normal | a large first OCR backlog, or you're away from the machine |
+| `pause` | 0 | | you need the CPU; new updates won't restart OCR until you resume |
+
+Switch from the agent with the `ocr_speed` tool, or from the shell:
+
+```bash
+folder-index --root "C:\Users\me\Downloads" ocr-speed turbo
+folder-index --root "C:\Users\me\Downloads" ocr-speed turbo --workers 8   # explicit count
+folder-index --root "C:\Users\me\Downloads" ocr-speed pause
+folder-index --root "C:\Users\me\Downloads" ocr-speed background         # resume quietly
+```
+
+Switching modes hands the queue over without redoing anything. The running pass stops after the file(s) in progress, and every finished file is already saved. As a reference point, on a 24-core laptop with Windows OCR, `background` handles about 1 file/s and `turbo` (23 workers) about 25 files/s.
 
 ## Use with Claude Code
 

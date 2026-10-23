@@ -85,6 +85,15 @@ def build(settings: Settings, auto_refresh: bool = True) -> MCPServer:
             return query.status(conn, settings.db_path)
 
     @mcp.tool()
+    def ocr_speed(mode: str = "turbo", workers: int = 0) -> str:
+        """Control the OCR pass over scanned PDFs and images.
+        mode: "turbo" = parallel workers on all CPU cores but one (capped by free RAM), normal
+        priority, fastest; "background" = one low-priority worker (default after updates);
+        "pause" = stop OCR until resumed. workers: override the worker count (0 = auto).
+        A running pass hands its remaining queue over without redoing finished files."""
+        return indexer.set_ocr_speed(settings, mode.lower().strip(), workers)
+
+    @mcp.tool()
     def refresh_index() -> str:
         """Start an incremental re-index in the background (only new/changed files are read).
         Scanned PDFs and images found along the way are OCR'd afterwards, also in the background."""

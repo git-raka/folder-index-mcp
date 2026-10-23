@@ -24,6 +24,13 @@ def main(argv: list[str] | None = None) -> None:
     up.add_argument("--no-ocr", action="store_true", help="don't start the background OCR pass")
     oc = sub.add_parser("ocr", help="OCR scanned PDFs and images now (foreground)")
     oc.add_argument("--limit", type=int, default=None)
+    oc.add_argument("--mode", choices=["background", "turbo"], default="background",
+                    help="background: 1 low-priority worker; turbo: all cores but one, capped by free RAM")
+    oc.add_argument("--workers", type=int, default=0, help="override the worker count")
+    oc.add_argument("--takeover", action="store_true", help="stop a running OCR pass and continue its queue")
+    ocs = sub.add_parser("ocr-speed", help="switch the background OCR pass: background | turbo | pause")
+    ocs.add_argument("mode", choices=["background", "turbo", "pause"])
+    ocs.add_argument("--workers", type=int, default=0)
     sv = sub.add_parser("serve", help="run the MCP server on stdio")
     sv.add_argument("--no-auto-refresh", action="store_true")
     se = sub.add_parser("search", help="full-text search")
@@ -52,7 +59,11 @@ def main(argv: list[str] | None = None) -> None:
             indexer.spawn_ocr_if_pending(settings, log=log)
         return
     if a.cmd == "ocr":
-        indexer.run_ocr(settings, log=log, limit=a.limit)
+        indexer.run_ocr(settings, log=log, limit=a.limit, mode=a.mode,
+                        workers=a.workers or None, takeover=a.takeover)
+        return
+    if a.cmd == "ocr-speed":
+        print(indexer.set_ocr_speed(settings, a.mode, a.workers))
         return
 
     if not settings.db_path.exists():

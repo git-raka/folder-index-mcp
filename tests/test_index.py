@@ -85,3 +85,22 @@ def test_scanned_pdf_is_ocrd(tmp_path, monkeypatch):
         assert "docs/scan.pdf" in query.search(conn, "invoice 4711")
         assert "[OCR]" in query.read_text(conn, "docs/scan.pdf")
     assert indexer.run_ocr(s, log=lambda m: None)["done"] == 0  # nothing left in the queue
+
+
+def test_ocr_pause_stop_and_worker_count(tmp_path):
+    s = build(tmp_path)
+    assert indexer.auto_workers("background") == 1
+    assert indexer.auto_workers("turbo") >= 1
+
+    indexer.set_ocr_speed(s, "pause")
+    with closing(indexer.connect(s.db_path, readonly=True)) as conn:
+        assert indexer.ocr_paused(conn)
+        assert "paused" in query.status(conn, s.db_path) or "nothing queued" in query.status(conn, s.db_path)
+    assert indexer.spawn_ocr_if_pending(s, log=lambda m: None) >= 0  # paused: never spawns
+
+    # a stop request makes a running pass exit before its next file
+    indexer._stop_path(s.db_path).touch()
+    with indexer.UpdateLock(s.db_path, ".ocr.lock"):
+        assert indexer.is_ocr_running(s.db_path)
+    assert not indexer.is_ocr_running(s.db_path)
+    indexer._stop_path(s.db_path).unlink()

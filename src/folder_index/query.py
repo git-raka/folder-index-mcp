@@ -184,7 +184,10 @@ def _ocr_line(conn: sqlite3.Connection, db_path: Path) -> str:
                              "FROM files WHERE ocr IS NOT NULL GROUP BY 1").fetchall())
     if not pending and not rows:
         return "OCR: nothing queued" + ("" if indexer.ocr_installed() else " (OCR extra not installed)")
-    running = "running" if indexer.is_ocr_running(db_path) else "idle"
+    if indexer.is_ocr_running(db_path):
+        running = f"running: {indexer.get_meta(conn, 'ocr_mode', '') or 'starting'}"
+    else:
+        running = "paused" if indexer.ocr_paused(conn) else "idle"
     done = ", ".join(f"{k} {v:,}" for k, v in sorted(rows.items()))
     return f"OCR ({running}): {pending:,} pending" + (f", {done}" if done else "")
 

@@ -197,8 +197,8 @@ def is_ocr_running(db_path: Path) -> bool:
     return _running(db_path, ".ocr.lock")
 
 
-def spawn(settings: Settings, *args: str) -> None:
-    """Run `folder-index <args>` detached, low priority, output appended to the log next to the index."""
+def spawn(settings: Settings, *args: str, low_priority: bool = True) -> None:
+    """Run `folder-index <args>` detached, output appended to the log next to the index."""
     log = open(settings.db_path.with_suffix(".log"), "a", encoding="utf-8")
     cmd = [sys.executable, "-m", "folder_index.cli", "--root", str(settings.root),
            "--db", str(settings.db_path), *args]
@@ -206,8 +206,9 @@ def spawn(settings: Settings, *args: str) -> None:
     if os.name != "nt":
         subprocess.Popen(cmd, start_new_session=True, **kw)
         return
-    flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-             | subprocess.BELOW_NORMAL_PRIORITY_CLASS)
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    if low_priority:
+        flags |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
     try:  # outlive the MCP host, which may kill its whole job when the session ends
         subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
     except OSError:
@@ -317,14 +318,100 @@ def ocr_installed() -> bool:
     return all(importlib.util.find_spec(m) for m in ("pypdfium2", "PIL"))
 
 
+OCR_MODES = ("background", "turbo")
+WORKER_RAM_MB = 350  # rough peak per OCR worker: a 200-dpi page render plus the engine
+
+
+def _free_ram_mb() -> int | None:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            st = MEMORYSTATUSEX(dwLength=ctypes.sizeof(MEMORYSTATUSEX))
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+            return st.ullAvailPhys // (1024 * 1024)
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+
+def auto_workers(mode: str) -> int:
+    """background: 1 worker. turbo: every core but one, capped by free RAM."""
+    if mode != "turbo":
+        return 1
+    cpu = max(1, (os.cpu_count() or 2) - 1)
+    ram = _free_ram_mb()
+    by_ram = max(1, ram // WORKER_RAM_MB) if ram else cpu
+    return max(1, min(cpu, by_ram, 32))
+
+
+def _stop_path(db_path: Path) -> Path:
+    return db_path.with_suffix(".ocr.stop")
+
+
+def ocr_paused(conn: sqlite3.Connection) -> bool:
+    return get_meta(conn, "ocr_paused", "0") == "1"
+
+
+def set_ocr_paused(settings: Settings, paused: bool) -> None:
+    conn = connect(settings.db_path)
+    set_meta(conn, "ocr_paused", "1" if paused else "0")
+    conn.commit()
+    conn.close()
+
+
+def stop_ocr(settings: Settings, wait: float = 0) -> bool:
+    """Ask a running OCR pass to stop after its current file(s). Returns True once nothing runs."""
+    if not is_ocr_running(settings.db_path):
+        return True
+    _stop_path(settings.db_path).touch()
+    deadline = time.time() + wait
+    while time.time() < deadline and is_ocr_running(settings.db_path):
+        time.sleep(0.5)
+    return not is_ocr_running(settings.db_path)
+
+
+def set_ocr_speed(settings: Settings, mode: str, workers: int = 0) -> str:
+    """Switch the OCR pass to background / turbo, or pause it. Never blocks."""
+    if mode == "pause":
+        set_ocr_paused(settings, True)
+        stopped = stop_ocr(settings, wait=0)
+        return "OCR paused." if stopped else "OCR will pause after the file(s) in progress."
+    if mode not in OCR_MODES:
+        return f"Unknown mode {mode!r}; use background, turbo or pause."
+    if not ocr_installed():
+        return "OCR is not installed: pip install 'folder-index-mcp[ocr]'."
+    set_ocr_paused(settings, False)
+    n = workers or auto_workers(mode)
+    args = ["ocr", "--mode", mode, "--workers", str(n)]
+    running = is_ocr_running(settings.db_path)
+    if running:
+        args.append("--takeover")
+    spawn(settings, *args, low_priority=mode != "turbo")
+    how = "switching after the file(s) in progress" if running else "starting now"
+    return f"OCR {mode} with {n} worker{'s' if n > 1 else ''}: {how}."
+
+
 def spawn_ocr_if_pending(settings: Settings, log=print) -> int:
     """Start a background OCR pass when scans/images are waiting. Returns the queue size."""
     if not ocr_installed() or is_ocr_running(settings.db_path):
         return 0
     conn = connect(settings.db_path)
+    paused = ocr_paused(conn)
     pending = conn.execute(f"SELECT count(*) FROM files WHERE {OCR_WHERE}").fetchone()[0]
     conn.close()
-    if pending:
+    if pending and not paused:
         spawn(settings, "ocr")
         log(f"OCR started in the background for {pending:,} scanned PDFs/images.")
     return pending
@@ -343,37 +430,78 @@ def _lower_priority() -> None:
         pass
 
 
-def run_ocr(settings: Settings, log=print, limit: int | None = None) -> dict:
+def _ocr_one(engine, root: str, rel: str, ext: str, size: int, mtime: float) -> tuple[str, str] | None:
+    """OCR one file. Returns (text, state), or None when the file changed since indexing."""
+    from . import ocr
+    from .extract import _clean
+
+    path = Path(root) / rel
+    try:
+        st = path.stat()
+        if st.st_size != size or abs(st.st_mtime - mtime) > 1e-3:
+            return None  # the next update re-queues it
+        text = _clean(ocr.ocr_file(engine, path, ext))
+        return text, ("done" if text else "empty")
+    except Exception as exc:  # unreadable scan, odd image format, ...
+        return "", f"failed: {type(exc).__name__}: {exc}"[:300]
+
+
+_worker_engine = None
+
+
+def _ocr_worker_init(low_priority: bool) -> None:
+    global _worker_engine
+    from . import ocr
+
+    if low_priority:
+        _lower_priority()
+    _worker_engine = ocr.load_engine()
+
+
+def _ocr_worker_job(root: str, rel: str, ext: str, size: int, mtime: float):
+    return _ocr_one(_worker_engine, root, rel, ext, size, mtime)
+
+
+def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str = "background",
+            workers: int | None = None, takeover: bool = False) -> dict:
+    """Work through the OCR queue. takeover: stop a running pass first, then continue its queue."""
+    if takeover:
+        log("Asking the running OCR pass to stop...")
+        if not stop_ocr(settings, wait=600):
+            log("The running OCR pass did not stop; giving up.")
+            return {"skipped": True}
+    _stop_path(settings.db_path).unlink(missing_ok=True)
     lock = UpdateLock(settings.db_path, ".ocr.lock")
     with lock as got:
         if not got:
             log("An OCR pass is already running; skipped.")
             return {"skipped": True}
         from . import ocr
-        from .extract import _clean
 
         try:
             engine = ocr.load_engine()
         except ocr.OcrUnavailable as exc:
             log(f"OCR unavailable: {exc}")
             return {"unavailable": str(exc)}
-        _lower_priority()
+        n = workers or auto_workers(mode)
+        low = mode != "turbo"
+        if low:
+            _lower_priority()
         t0 = time.time()
         conn = connect(settings.db_path)
+        set_meta(conn, "ocr_mode", f"{mode} x{n}")
+        conn.commit()
         rows = conn.execute(f"SELECT id, path, ext, size, mtime FROM files WHERE {OCR_WHERE} "
                             "ORDER BY mtime DESC").fetchall()[:limit]
-        log(f"OCR ({engine.name}): {len(rows):,} files queued, newest first")
+        log(f"OCR ({engine.name}, {mode}, {n} worker{'s' if n > 1 else ''}): "
+            f"{len(rows):,} files queued, newest first")
         counts = {"done": 0, "empty": 0, "failed": 0}
-        for i, r in enumerate(rows, 1):
-            path = settings.root / r["path"]
-            try:
-                st = path.stat()
-                if st.st_size != r["size"] or abs(st.st_mtime - r["mtime"]) > 1e-3:
-                    continue  # changed since indexing; the next update re-queues it
-                text = _clean(ocr.ocr_file(engine, path, r["ext"]))
-                state = "done" if text else "empty"
-            except Exception as exc:  # unreadable scan, odd image format, ...
-                text, state = "", f"failed: {type(exc).__name__}: {exc}"[:300]
+        stop_file = _stop_path(settings.db_path)
+
+        def save(r, result) -> None:
+            if result is None:
+                return
+            text, state = result
             if text:
                 old = conn.execute("SELECT content FROM fts WHERE rowid = ?", (r["id"],)).fetchone()
                 prefix = old[0] + "\n\n" if old and old[0] else ""
@@ -385,11 +513,41 @@ def run_ocr(settings: Settings, log=print, limit: int | None = None) -> dict:
             conn.commit()
             lock.touch()
             counts[state.split(":")[0]] += 1
-            if i % 50 == 0:
-                log(f"  OCR {i:,}/{len(rows):,}")
+
+        def job_args(r):
+            return str(settings.root), r["path"], r["ext"], r["size"], r["mtime"]
+
+        stopped = False
+        if n == 1:
+            for i, r in enumerate(rows, 1):
+                if stop_file.exists():
+                    stopped = True
+                    break
+                save(r, _ocr_one(engine, *job_args(r)))
+                if i % 50 == 0:
+                    log(f"  OCR {i:,}/{len(rows):,}")
+        else:
+            del engine  # each worker process loads its own
+            with ProcessPoolExecutor(max_workers=n, initializer=_ocr_worker_init, initargs=(low,)) as pool:
+                futures = {pool.submit(_ocr_worker_job, *job_args(r)): r for r in rows}
+                for i, fut in enumerate(as_completed(futures), 1):
+                    try:
+                        result = fut.result()
+                    except Exception as exc:  # a worker crashed on this file
+                        result = ("", f"failed: {type(exc).__name__}: {exc}"[:300])
+                    save(futures[fut], result)
+                    if i % 100 == 0:
+                        log(f"  OCR {i:,}/{len(rows):,} ({i / (time.time() - t0):.1f} files/s)")
+                    if stop_file.exists():
+                        stopped = True
+                        pool.shutdown(wait=True, cancel_futures=True)
+                        break
+        set_meta(conn, "ocr_mode", "")
+        conn.commit()
         conn.close()
-        stats = {**counts, "seconds": round(time.time() - t0, 1)}
-        log(f"OCR done: {stats}")
+        stop_file.unlink(missing_ok=True)
+        stats = {**counts, "stopped": stopped, "workers": n, "seconds": round(time.time() - t0, 1)}
+        log(f"OCR {'stopped' if stopped else 'done'}: {stats}")
         return stats
 
 
