@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -157,11 +158,8 @@ class UpdateLock:
 
     def __enter__(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if time.time() - self.path.stat().st_mtime > self.STALE_SECONDS:
-                self.path.unlink()
-        except FileNotFoundError:
-            pass
+        if self.path.exists() and not _lock_alive(self.path):
+            self.path.unlink(missing_ok=True)  # left behind by a killed process
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode())
@@ -181,12 +179,22 @@ class UpdateLock:
             self.path.unlink(missing_ok=True)
 
 
-def _running(db_path: Path, suffix: str) -> bool:
-    lock = db_path.with_suffix(suffix)
+def _lock_alive(lock: Path) -> bool:
+    """A lock counts only while the process that wrote it is alive (and it isn't ancient).
+    Background passes can be killed with their host, e.g. when an MCP client exits."""
+    from .presence import pid_alive
+
     try:
-        return time.time() - lock.stat().st_mtime < UpdateLock.STALE_SECONDS
-    except FileNotFoundError:
+        if time.time() - lock.stat().st_mtime > UpdateLock.STALE_SECONDS:
+            return False
+        pid = int(lock.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
         return False
+    return pid == os.getpid() or pid_alive(pid)
+
+
+def _running(db_path: Path, suffix: str) -> bool:
+    return _lock_alive(db_path.with_suffix(suffix))
 
 
 def is_updating(db_path: Path) -> bool:
@@ -197,11 +205,32 @@ def is_ocr_running(db_path: Path) -> bool:
     return _running(db_path, ".ocr.lock")
 
 
+def load_json(value: str | None):
+    try:
+        return json.loads(value) if value else None
+    except ValueError:
+        return None
+
+
+def cli_command() -> list[str]:
+    """How to invoke the CLI: the module from source, or the console exe next to a frozen app."""
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).with_name("folder-index.exe" if os.name == "nt" else "folder-index")
+        return [str(exe)]
+    return [sys.executable, "-m", "folder_index.cli"]
+
+
 def spawn(settings: Settings, *args: str, low_priority: bool = True) -> None:
-    """Run `folder-index <args>` detached, output appended to the log next to the index."""
-    log = open(settings.db_path.with_suffix(".log"), "a", encoding="utf-8")
-    cmd = [sys.executable, "-m", "folder_index.cli", "--root", str(settings.root),
-           "--db", str(settings.db_path), *args]
+    """Run `folder-index --root <root> <args>` detached, logging next to the index."""
+    spawn_cli(["--root", str(settings.root), "--db", str(settings.db_path), *args],
+              settings.db_path.with_suffix(".log"), low_priority)
+
+
+def spawn_cli(args: list[str], log_path: Path, low_priority: bool = True) -> None:
+    """Run `folder-index <args>` detached from this process, output appended to log_path."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log = open(log_path, "a", encoding="utf-8")
+    cmd = [*cli_command(), *args]
     kw = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
     if os.name != "nt":
         subprocess.Popen(cmd, start_new_session=True, **kw)
@@ -230,6 +259,11 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
     conn.commit()
     # never index the index itself, nor this tool's own checkout when it lives under root
     skip = {settings.db_path.parent, Path(__file__).resolve().parents[2]}
+    def progress(phase: str, done: int = 0, total: int = 0) -> None:
+        set_meta(conn, "progress", json.dumps({"phase": phase, "done": done, "total": total, "started": t0}))
+        conn.commit()
+
+    progress("scanning")
     entries = scan(settings, skip)
     log(f"Scanned {len(entries):,} files in {time.time() - t0:.1f}s")
 
@@ -269,7 +303,7 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
     for i, e in enumerate(todo_meta, 1):
         write(e, e.status)
         if i % 2000 == 0:
-            conn.commit()
+            progress("listing", i, len(todo_meta))
     conn.commit()
     log(f"Metadata: {len(todo_meta):,} new/changed, {len(gone):,} removed")
 
@@ -290,12 +324,13 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
                 if err:
                     errors += 1
                 if i % 100 == 0:
-                    conn.commit()
+                    progress("reading", i, len(todo_content))
                     if i % 500 == 0:
                         log(f"  {i:,}/{len(todo_content):,}")
         conn.commit()
 
     set_meta(conn, "last_update", time.time())
+    set_meta(conn, "progress", "")
     if todo_content or gone:
         conn.execute("INSERT INTO fts(fts) VALUES('optimize')")
     conn.commit()
@@ -493,6 +528,9 @@ def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str =
         conn.commit()
         rows = conn.execute(f"SELECT id, path, ext, size, mtime FROM files WHERE {OCR_WHERE} "
                             "ORDER BY mtime DESC").fetchall()[:limit]
+        set_meta(conn, "ocr_progress", json.dumps({"done": 0, "total": len(rows), "started": t0,
+                                                   "workers": n, "mode": mode}))
+        conn.commit()
         log(f"OCR ({engine.name}, {mode}, {n} worker{'s' if n > 1 else ''}): "
             f"{len(rows):,} files queued, newest first")
         counts = {"done": 0, "empty": 0, "failed": 0}
@@ -510,9 +548,11 @@ def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str =
                 conn.execute("UPDATE files SET chars = ?, ocr = ? WHERE id = ?", (len(merged), state, r["id"]))
             else:
                 conn.execute("UPDATE files SET ocr = ? WHERE id = ?", (state, r["id"]))
+            counts[state.split(":")[0]] += 1
+            set_meta(conn, "ocr_progress", json.dumps({"done": sum(counts.values()), "total": len(rows),
+                                                       "started": t0, "workers": n, "mode": mode}))
             conn.commit()
             lock.touch()
-            counts[state.split(":")[0]] += 1
 
         def job_args(r):
             return str(settings.root), r["path"], r["ext"], r["size"], r["mtime"]
@@ -543,6 +583,7 @@ def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str =
                         pool.shutdown(wait=True, cancel_futures=True)
                         break
         set_meta(conn, "ocr_mode", "")
+        set_meta(conn, "ocr_progress", "")
         conn.commit()
         conn.close()
         stop_file.unlink(missing_ok=True)

@@ -14,3 +14,8 @@ dist/
 *.lock
 !uv.lock
 *.log
+
+# PyInstaller output
+packaging/build/
+packaging/dist/
+packaging/dist-new/

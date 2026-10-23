@@ -123,3 +123,70 @@ class Settings:
             if fnmatch.fnmatch(rel_posix, g) or fnmatch.fnmatch(name, g):
                 return True
         return False
+
+
+# --- app-wide config: the list of indexed folders --------------------------
+
+def data_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
+    return Path(base) / "folder-index"
+
+
+def config_path() -> Path:
+    return data_dir() / "config.json"
+
+
+def load_app_config() -> dict:
+    import json
+
+    try:
+        cfg = json.loads(config_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        cfg = {}
+    cfg.setdefault("roots", [])
+    return cfg
+
+
+def save_app_config(cfg: dict) -> None:
+    import json
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def configured_roots(include_disabled: bool = False) -> list[Path]:
+    return [Path(r["path"]) for r in load_app_config()["roots"]
+            if include_disabled or r.get("enabled", True)]
+
+
+def add_root(path: str | os.PathLike) -> Path:
+    p = Path(path).expanduser().resolve()
+    if not p.is_dir():
+        raise ValueError(f"not a folder: {p}")
+    cfg = load_app_config()
+    if not any(Path(r["path"]) == p for r in cfg["roots"]):
+        cfg["roots"].append({"path": str(p), "enabled": True})
+        save_app_config(cfg)
+    return p
+
+
+def remove_root(path: str | os.PathLike) -> bool:
+    p = Path(path).expanduser().resolve()
+    cfg = load_app_config()
+    keep = [r for r in cfg["roots"] if Path(r["path"]) != p]
+    changed = len(keep) != len(cfg["roots"])
+    cfg["roots"] = keep
+    save_app_config(cfg)
+    return changed
+
+
+def set_root_enabled(path: str | os.PathLike, enabled: bool) -> None:
+    p = Path(path).expanduser().resolve()
+    cfg = load_app_config()
+    for r in cfg["roots"]:
+        if Path(r["path"]) == p:
+            r["enabled"] = enabled
+    save_app_config(cfg)

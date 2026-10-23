@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Folder Index</title>
+<style>
+:root {
+  --bg: #0b0d14; --bg2: #10131c; --panel: #151926; --panel2: #1b2030; --line: #262c3f;
+  --text: #e7e9f2; --muted: #8b92a9; --faint: #5d6480;
+  --accent: #7c5cf6; --accent2: #6366f1; --accent-soft: rgba(124, 92, 246, .16);
+  --ok: #22c55e; --ok-soft: rgba(34, 197, 94, .14); --warn: #f59e0b; --warn-soft: rgba(245, 158, 11, .14);
+  --bad: #ef4444; --bad-soft: rgba(239, 68, 68, .14); --info: #38bdf8; --info-soft: rgba(56, 189, 248, .14);
+  --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.25);
+  --radius: 14px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6fa; --bg2: #eef0f6; --panel: #ffffff; --panel2: #f7f8fc; --line: #e3e6ef;
+    --text: #151827; --muted: #5f6680; --faint: #9aa0b5; --accent-soft: rgba(124, 92, 246, .10);
+    --shadow: 0 1px 2px rgba(16,24,40,.04), 0 6px 18px rgba(16,24,40,.06);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased; }
+button, input { font: inherit; color: inherit; }
+.app { display: grid; grid-template-columns: 232px 1fr; height: 100vh; }
+
+/* sidebar */
+.side { background: var(--bg2); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 18px 12px; gap: 4px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 18px; }
+.logo { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(160deg, var(--accent2), #a855f7);
+  display: grid; place-items: center; box-shadow: 0 6px 18px rgba(124,92,246,.35); }
+.brand b { font-size: 15px; letter-spacing: .1px; display: block; }
+.brand small { color: var(--faint); font-size: 11.5px; }
+.nav { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 10px; color: var(--muted);
+  cursor: pointer; border: 0; background: none; text-align: left; width: 100%; transition: background .15s, color .15s; }
+.nav:hover { background: var(--panel); color: var(--text); }
+.nav.on { background: var(--accent-soft); color: var(--text); }
+.nav.on svg { color: var(--accent); }
+.nav .badge { margin-left: auto; }
+.side .grow { flex: 1; }
+.health { margin: 8px 4px 0; padding: 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); font-size: 12.5px; }
+.health .row { display: flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); }
+.dot.busy { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.4s infinite; }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); }
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* main */
+main { overflow-y: auto; padding: 28px 34px 40px; }
+.head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 22px; }
+.head h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.2px; }
+.head p { margin: 4px 0 0; color: var(--muted); }
+.head .actions { margin-left: auto; display: flex; gap: 8px; }
+.view { display: none; animation: fade .18s ease; }
+.view.on { display: block; }
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } }
+
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s, transform .05s; white-space: nowrap; }
+.btn:hover { border-color: var(--faint); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: linear-gradient(160deg, var(--accent2), var(--accent)); border-color: transparent; color: white; box-shadow: 0 6px 16px rgba(124,92,246,.28); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; }
+.btn.danger:hover { border-color: var(--bad); color: var(--bad); }
+.btn.sm { padding: 5px 10px; font-size: 12.5px; border-radius: 8px; }
+.btn:disabled { opacity: .45; cursor: default; }
+
+.grid { display: grid; gap: 14px; }
+.stats { grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.stat { padding: 16px 18px; }
+.stat .k { color: var(--muted); font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
+.stat .v { font-size: 26px; font-weight: 650; margin-top: 6px; letter-spacing: -.4px; font-variant-numeric: tabular-nums; }
+.stat .s { color: var(--faint); font-size: 12px; margin-top: 2px; }
+.two { grid-template-columns: 1.55fr 1fr; align-items: start; }
+.card h3 { margin: 0; font-size: 14.5px; font-weight: 600; }
+.card .ch { display: flex; align-items: center; gap: 10px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.card .ch .sub { color: var(--faint); font-size: 12.5px; }
+.card .ch .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.card .cb { padding: 16px 18px; }
+
+.seg { display: inline-flex; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 2px; }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 12.5px; display: inline-flex; gap: 6px; align-items: center; }
+.seg button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+.seg button.on.turbo { background: linear-gradient(160deg, var(--accent2), var(--accent)); color: white; }
+
+.job { padding: 14px 0; border-bottom: 1px dashed var(--line); }
+.job:last-child { border-bottom: 0; padding-bottom: 2px; }
+.job:first-child { padding-top: 2px; }
+.job .top { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.job .name { font-weight: 600; }
+.job .path { color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
+.job .meta { margin-left: auto; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.bar { height: 8px; border-radius: 99px; background: var(--bg2); overflow: hidden; position: relative; border: 1px solid var(--line); }
+.bar > i { position: absolute; inset: 0 auto 0 0; border-radius: 99px; background: linear-gradient(90deg, var(--accent2), #a855f7); transition: width .6s ease; }
+.bar.ok > i { background: linear-gradient(90deg, #16a34a, var(--ok)); }
+.bar.indet > i { width: 35% !important; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { from { left: -35%; } to { left: 100%; } }
+.lbl { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin: 6px 0 10px; font-variant-numeric: tabular-nums; }
+.lbl:last-child { margin-bottom: 0; }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 9px; border-radius: 99px; background: var(--panel2); color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.chip.busy { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.chip.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.chip.info { background: var(--info-soft); color: var(--info); border-color: transparent; }
+.badge { font-size: 11px; min-width: 20px; padding: 1px 7px; border-radius: 99px; background: var(--accent); color: white; text-align: center; }
+
+.ai { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.ai + .ai { border-top: 1px solid var(--line); }
+.av { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: white; flex: none; }
+.ai .who { font-weight: 600; }
+.ai .when { color: var(--faint); font-size: 12px; }
+.ai .right { margin-left: auto; }
+.empty { color: var(--faint); text-align: center; padding: 22px 8px; font-size: 13px; }
+.empty b { color: var(--muted); display: block; margin-bottom: 4px; font-weight: 600; }
+
+/* folders */
+.folder { display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: center; padding: 16px 18px; }
+.folder + .folder { border-top: 1px solid var(--line); }
+.ficon { width: 44px; height: 44px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
+.folder.off .ficon { background: var(--panel2); color: var(--faint); }
+.folder .t { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.folder .p { color: var(--faint); font-size: 12.5px; margin-top: 2px; word-break: break-all; }
+.folder .facts { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: 12.5px; flex-wrap: wrap; }
+.folder .acts { display: flex; gap: 6px; align-items: center; }
+.switch { position: relative; width: 36px; height: 20px; border-radius: 99px; background: var(--line); border: 0; cursor: pointer; transition: background .2s; flex: none; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: white; transition: transform .2s; }
+.switch.on { background: var(--accent); }
+.switch.on::after { transform: translateX(16px); }
+
+/* search */
+.sbox { display: flex; align-items: center; gap: 12px; padding: 4px 6px 4px 18px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); margin-bottom: 16px; }
+.sbox:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.sbox input { flex: 1; border: 0; outline: 0; background: none; font-size: 16px; padding: 12px 0; }
+.sbox svg { color: var(--faint); }
+.hit { display: grid; grid-template-columns: 40px 1fr auto; gap: 14px; padding: 14px 18px; align-items: start; cursor: pointer; transition: background .12s; }
+.hit:hover { background: var(--panel2); }
+.hit + .hit { border-top: 1px solid var(--line); }
+.ext { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; color: white; }
+.hit .n { font-weight: 600; word-break: break-word; }
+.hit .d { color: var(--faint); font-size: 12px; margin-top: 1px; word-break: break-all; }
+.hit .sn { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.hit mark { background: rgba(250, 204, 21, .22); color: var(--text); border-radius: 3px; padding: 0 2px; }
+.hit .side-meta { text-align: right; color: var(--faint); font-size: 12px; white-space: nowrap; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.hit .hacts { display: flex; gap: 6px; opacity: 0; transition: opacity .12s; }
+.hit:hover .hacts { opacity: 1; }
+
+/* AI apps */
+.apps { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.app-card { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.app-card .top { display: flex; gap: 12px; align-items: center; }
+.app-card .nm { font-weight: 650; }
+.app-card .hint { color: var(--faint); font-size: 12.5px; min-height: 34px; }
+.app-card .foot { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+.app-card .foot .btn { margin-left: auto; }
+.app-card.dim { opacity: .6; }
+.live { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-size: 12px; font-weight: 600; }
+
+/* settings */
+.set { display: flex; align-items: center; gap: 16px; padding: 16px 18px; }
+.set + .set { border-top: 1px solid var(--line); }
+.set .tt { font-weight: 600; }
+.set .ds { color: var(--faint); font-size: 12.5px; margin-top: 2px; }
+.set .ctl { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+code, .mono { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; font-size: 12px; }
+.codebox { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; word-break: break-all; color: var(--muted); }
+
+.toast { position: fixed; right: 24px; bottom: 24px; max-width: 440px; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 12px; padding: 12px 16px; box-shadow: 0 12px 32px rgba(0,0,0,.35); transform: translateY(20px); opacity: 0; transition: all .25s; pointer-events: none; font-size: 13px; }
+.toast.on { transform: none; opacity: 1; }
+::-webkit-scrollbar { width: 10px; } ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; border: 2px solid var(--bg); }
+@media (max-width: 1080px) { .stats { grid-template-columns: repeat(2, 1fr); } .two { grid-template-columns: 1fr; } }
+@media (max-width: 900px) {
+  .app { grid-template-columns: 64px 1fr; }
+  .side { padding: 14px 8px; align-items: center; }
+  .brand { padding: 4px 0 14px; } .brand > div:last-child, .health span:last-child { display: none; }
+  .nav { width: 44px; height: 40px; padding: 0; justify-content: center; font-size: 0; position: relative; }
+  .nav .badge { position: absolute; top: 2px; right: 0; font-size: 9.5px; min-width: 16px; padding: 0 4px; }
+  .health { padding: 10px; margin: 0; }
+  main { padding: 22px 20px 32px; }
+  .head { flex-wrap: wrap; } .head .actions { margin-left: 0; }
+  .folder { grid-template-columns: 36px 1fr; } .folder .acts { grid-column: 1 / -1; justify-content: flex-end; }
+  .ficon { width: 36px; height: 36px; }
+  .job .path { display: none; }
+  .card .ch { flex-wrap: wrap; } .card .ch .right { margin-left: 0; width: 100%; }
+}
+@media (max-width: 560px) {
+  .app { grid-template-columns: 52px 1fr; }
+  .side { padding: 12px 4px; } .nav { width: 40px; }
+  main { padding: 16px 12px 28px; }
+  .head h1 { font-size: 20px; }
+  .stats { gap: 10px; } .stat { padding: 12px 13px; } .stat .v { font-size: 21px; }
+  .hit { grid-template-columns: 34px 1fr; padding: 12px; } .hit .side-meta { grid-column: 2; align-items: flex-start; text-align: left; }
+  .hit .hacts { opacity: 1; } .ext { width: 34px; height: 34px; font-size: 9.5px; }
+  .sbox input { font-size: 15px; } .seg button { padding: 5px 9px; }
+  .apps { grid-template-columns: 1fr; }
+  .set { flex-wrap: wrap; } .set .ctl { margin-left: 0; }
+  .toast { left: 12px; right: 12px; bottom: 12px; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M19 15v4M17 17h4"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path fill="currentColor" d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M5 19c8 0 14-6 14-14-8 0-14 6-14 14zm0 0 7-7"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M9 6v12M15 6v12"/></symbol>
+    <symbol id="i-open" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></symbol>
+    <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo"><svg width="18" height="18" style="color:white"><use href="#i-search"/></svg></div>
+      <div><b>Folder Index</b><small id="ver">MCP file index</small></div>
+    </div>
+    <button class="nav on" data-view="overview"><svg width="18" height="18"><use href="#i-home"/></svg>Overview</button>
+    <button class="nav" data-view="folders"><svg width="18" height="18"><use href="#i-folder"/></svg>Folders<span class="badge" id="nav-folders" hidden></span></button>
+    <button class="nav" data-view="search"><svg width="18" height="18"><use href="#i-search"/></svg>Search</button>
+    <button class="nav" data-view="ai"><svg width="18" height="18"><use href="#i-spark"/></svg>AI apps<span class="badge" id="nav-ai" hidden></span></button>
+    <button class="nav" data-view="settings"><svg width="18" height="18"><use href="#i-gear"/></svg>Settings</button>
+    <div class="grow"></div>
+    <div class="health"><div class="row"><span class="dot" id="h-dot"></span><span id="h-text">Starting…</span></div></div>
+  </aside>
+
+  <main>
+    <!-- OVERVIEW -->
+    <section class="view on" id="v-overview">
+      <div class="head">
+        <div><h1>Overview</h1><p id="ov-sub">Everything your AI apps can find, at a glance.</p></div>
+        <div class="actions"><button class="btn primary" onclick="updateAll()"><svg width="16" height="16"><use href="#i-refresh"/></svg>Update all</button></div>
+      </div>
+      <div class="grid stats">
+        <div class="card stat"><div class="k"><svg width="14" height="14"><use href="#i-doc"/></svg>Files indexed</div><div class="v" id="s-files">–</div><div class="s" id="s-files2"></div></div>
+        <div class="card stat"><div class="k"><svg width="14" height="14"><use href="#i-search"/></svg>Readable content</div><div class="v" id="s-content">–</div><div class="s">documents, text &amp; archives</div></div>
+        <div class="card stat"><div class="k"><svg width="14" height="14"><use href="#i-scan"/></svg>OCR'd scans &amp; images</div><div class="v" id="s-ocr">–</div><div class="s" id="s-ocr2"></div></div>
+        <div class="card stat"><div class="k"><svg width="14" height="14"><use href="#i-db"/></svg>Index size</div><div class="v" id="s-db">–</div><div class="s" id="s-db2"></div></div>
+      </div>
+      <div class="grid two">
+        <div class="card">
+          <div class="ch"><h3>Activity</h3><span class="sub" id="act-sub"></span>
+            <div class="right"><div class="seg" id="ocr-seg">
+              <button data-mode="background" title="1 low-priority worker"><svg width="13" height="13"><use href="#i-leaf"/></svg>Background</button>
+              <button data-mode="turbo" class="turbo" title="All CPU cores but one"><svg width="13" height="13"><use href="#i-bolt"/></svg>Turbo</button>
+              <button data-mode="pause" title="Stop OCR until resumed"><svg width="13" height="13"><use href="#i-pause"/></svg>Pause</button>
+            </div></div>
+          </div>
+          <div class="cb" id="jobs"></div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>AI apps</h3><span class="sub" id="ai-sub">using this index</span>
+            <div class="right"><button class="btn sm ghost" onclick="go('ai')">Manage</button></div></div>
+          <div class="cb" id="live"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOLDERS -->
+    <section class="view" id="v-folders">
+      <div class="head">
+        <div><h1>Folders</h1><p>Each folder gets its own private index on this computer.</p></div>
+        <div class="actions"><button class="btn primary" onclick="addFolder()"><svg width="16" height="16"><use href="#i-plus"/></svg>Add folder</button></div>
+      </div>
+      <div class="card" id="folders"></div>
+    </section>
+
+    <!-- SEARCH -->
+    <section class="view" id="v-search">
+      <div class="head"><div><h1>Search</h1><p>The same index your AI apps use: names, contents and OCR'd text.</p></div></div>
+      <div class="sbox"><svg width="20" height="20"><use href="#i-search"/></svg>
+        <input id="q" placeholder="Search names and contents… e.g. invoice march hosting" autocomplete="off" spellcheck="false">
+        <span class="chip" id="q-count" hidden></span></div>
+      <div class="card" id="hits"><div class="empty"><b>Type to search</b>Every word must match; words match as prefixes. Use "quotes" for an exact phrase.</div></div>
+    </section>
+
+    <!-- AI APPS -->
+    <section class="view" id="v-ai">
+      <div class="head">
+        <div><h1>AI apps</h1><p>Connect the index to the AI apps on this computer. Nothing leaves your machine.</p></div>
+        <div class="actions"><button class="btn" onclick="loadClients(true)"><svg width="16" height="16"><use href="#i-refresh"/></svg>Re-detect</button></div>
+      </div>
+      <div class="grid apps" id="apps"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="view" id="v-settings">
+      <div class="head"><div><h1>Settings</h1><p>How Folder Index runs on this computer.</p></div></div>
+      <div class="card">
+        <div class="set"><div><div class="tt">Start with Windows</div><div class="ds">Launch minimized to the tray at sign-in, so indexes stay fresh.</div></div>
+          <div class="ctl"><button class="switch" id="autostart" onclick="toggleAutostart()"></button></div></div>
+        <div class="set"><div><div class="tt">OCR turbo</div><div class="ds" id="turbo-ds"></div></div>
+          <div class="ctl"><span class="chip" id="ocr-inst"></span></div></div>
+        <div class="set"><div><div class="tt">MCP server command</div><div class="ds">Use this in any MCP client that isn't listed under AI apps.</div>
+          <div class="codebox mono" id="cmd" style="margin-top:8px"></div></div>
+          <div class="ctl"><button class="btn sm" onclick="copyCmd()">Copy</button></div></div>
+        <div class="set"><div><div class="tt">Data folder</div><div class="ds mono" id="datadir"></div></div>
+          <div class="ctl"><button class="btn sm" onclick="api().open_data_dir()"><svg width="14" height="14"><use href="#i-open"/></svg>Open</button></div></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = () => window.pywebview.api;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = n => (n ?? 0).toLocaleString("en-US");
+const bytes = n => { n = n || 0; for (const u of ["B","KB","MB","GB","TB"]) { if (n < 1024 || u === "TB") return (u === "B" ? n : n.toFixed(1)) + " " + u; n /= 1024; } };
+const ago = ts => { if (!ts) return "never"; const s = Date.now()/1000 - ts;
+  if (s < 45) return "just now"; if (s < 3600) return Math.round(s/60) + " min ago";
+  if (s < 86400) return Math.round(s/3600) + " h ago"; return Math.round(s/86400) + " d ago"; };
+const dur = s => { if (!isFinite(s) || s < 0) return "–"; if (s < 60) return Math.ceil(s) + "s";
+  if (s < 3600) return Math.floor(s/60) + "m " + String(Math.round(s % 60)).padStart(2, "0") + "s";
+  return Math.floor(s/3600) + "h " + Math.round((s % 3600)/60) + "m"; };
+let state = null, meta = null, clientsList = [], view = "overview";
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 4200); }
+function go(v) { view = v; document.querySelectorAll(".nav").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  document.querySelectorAll(".view").forEach(s => s.classList.toggle("on", s.id === "v-" + v));
+  if (v === "search") setTimeout(() => $("#q").focus(), 50); if (v === "ai") loadClients(false); }
+document.querySelectorAll(".nav").forEach(b => b.onclick = () => go(b.dataset.view));
+
+// known MCP client names -> pretty name + colour
+const CLIENT_LOOK = [
+  [/claude[- ]?code/i, "Claude Code", "#d97757"], [/claude/i, "Claude Desktop", "#d97757"],
+  [/gemini/i, "Gemini CLI", "#4285f4"], [/cursor/i, "Cursor", "#52525b"], [/windsurf|codeium/i, "Windsurf", "#0ea5a4"],
+  [/insiders/i, "VS Code Insiders", "#24bfa5"], [/visual studio code|vscode|copilot/i, "VS Code", "#007acc"],
+  [/chatgpt|openai/i, "ChatGPT", "#10a37f"],
+];
+function look(name) { for (const [re, pretty, color] of CLIENT_LOOK) if (re.test(name || "")) return {pretty, color};
+  return {pretty: name || "Unknown app", color: "#64748b"}; }
+const initials = s => s.split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase();
+const EXT_COLORS = {pdf:"#ef4444", docx:"#2563eb", doc:"#2563eb", xlsx:"#16a34a", xls:"#16a34a", csv:"#16a34a", pptx:"#ea580c", ppt:"#ea580c",
+  zip:"#a16207", png:"#9333ea", jpg:"#9333ea", jpeg:"#9333ea", txt:"#64748b", md:"#64748b", json:"#0891b2"};
+
+function render() {
+  if (!state) return;
+  const F = state.folders.filter(f => f.enabled !== false);
+  const sum = k => F.reduce((a, f) => a + (k(f) || 0), 0);
+  $("#s-files").textContent = fmt(sum(f => f.files));
+  $("#s-files2").textContent = `${F.length} folder${F.length === 1 ? "" : "s"} · ${bytes(sum(f => f.total_size))}`;
+  $("#s-content").textContent = fmt(sum(f => (f.by_status || {}).content));
+  $("#s-ocr").textContent = fmt(sum(f => f.ocr && f.ocr.done));
+  const pend = sum(f => f.ocr && f.ocr.pending);
+  $("#s-ocr2").textContent = pend ? `${fmt(pend)} waiting` : "queue empty";
+  $("#s-db").textContent = bytes(sum(f => f.db_size));
+  const last = Math.max(0, ...F.map(f => f.last_update || 0));
+  $("#s-db2").textContent = "updated " + ago(last);
+
+  // OCR mode buttons
+  const running = F.find(f => f.ocr && f.ocr.running);
+  const paused = F.length && F.every(f => !f.ocr || f.ocr.paused || !f.ocr.pending);
+  let mode = running ? ((running.ocr.mode || "").startsWith("turbo") ? "turbo" : "background") : (F.some(f => f.ocr && f.ocr.paused) ? "pause" : "");
+  document.querySelectorAll("#ocr-seg button").forEach(b => b.classList.toggle("on", b.dataset.mode === mode));
+
+  // activity
+  const jobs = F.map(f => {
+    let html = `<div class="job"><div class="top"><span class="name">${esc(f.label)}</span><span class="path">${esc(f.root)}</span>`;
+    if (f.never && !f.updating) return html + `<span class="meta"><span class="chip warn">not indexed</span></span></div></div>`;
+    const o = f.ocr || {};
+    let chip = `<span class="chip ok">up to date</span>`;
+    if (f.updating) chip = `<span class="chip busy">indexing</span>`;
+    else if (o.running) chip = `<span class="chip busy">OCR · ${esc(o.mode || "starting")}</span>`;
+    else if (o.paused && o.pending) chip = `<span class="chip warn">OCR paused</span>`;
+    else if (o.pending) chip = `<span class="chip info">OCR queued</span>`;
+    html += `<span class="meta">${chip}</span></div>`;
+    if (f.updating) {
+      const p = f.progress || {}; const pct = p.total ? 100 * p.done / p.total : 0;
+      const phase = {scanning: "Scanning folder", listing: "Recording file list", reading: "Reading documents"}[p.phase] || "Starting";
+      const indet = !p.total;
+      html += `<div class="bar ${indet ? "indet" : ""}"><i style="width:${pct}%"></i></div>
+        <div class="lbl"><span>${phase}${p.total ? ` · ${fmt(p.done)} / ${fmt(p.total)}` : "…"}</span><span>${p.started ? dur(Date.now()/1000 - p.started) + " elapsed" : ""}</span></div>`;
+    }
+    const total = (o.done || 0) + (o.empty || 0) + (o.failed || 0) + (o.pending || 0);
+    if (total) {
+      const fin = total - (o.pending || 0); const pct = 100 * fin / total;
+      let right = `${fmt(fin)} / ${fmt(total)}`;
+      const p = o.progress;
+      if (o.running && p && p.total && p.done) {
+        const el = Date.now()/1000 - p.started, rate = p.done / el;
+        right = `${rate.toFixed(rate < 10 ? 1 : 0)} files/s · ${dur((p.total - p.done) / rate)} left`;
+      }
+      html += `<div class="bar ${o.pending ? "" : "ok"}"><i style="width:${pct}%"></i></div>
+        <div class="lbl"><span>OCR ${Math.floor(pct)}% · ${fmt(o.done)} with text, ${fmt(o.empty)} no text${o.failed ? `, ${fmt(o.failed)} failed` : ""}</span><span>${right}</span></div>`;
+    } else if (!f.updating) {
+      html += `<div class="lbl"><span>${fmt(f.files)} files · last update ${ago(f.last_update)}</span><span></span></div>`;
+    }
+    return html + `</div>`;
+  });
+  $("#jobs").innerHTML = jobs.length ? jobs.join("") :
+    `<div class="empty"><b>No folders yet</b>Add a folder to start indexing.<br><br><button class="btn primary sm" onclick="addFolder()">Add folder</button></div>`;
+  const busy = F.filter(f => f.updating || (f.ocr && f.ocr.running)).length;
+  $("#act-sub").textContent = busy ? `${busy} running` : "idle";
+
+  // AI apps: everything set up, live ones first; plus any live client we didn't set up ourselves
+  const act = (state.sessions.active || []);
+  const hist = state.sessions.history || {};
+  const liveBy = name => act.filter(a => look(a.client).pretty === name);
+  const rows = [];
+  for (const c of clientsList.filter(c => c.connected)) {
+    const live = liveBy(c.name);
+    const seen = Object.entries(hist).filter(([n]) => look(n).pretty === c.name).map(([, h]) => h.last_seen);
+    rows.push({name: c.name, live: live.length, last: live.length ? Math.max(...live.map(a => a.last_seen)) : Math.max(0, ...seen),
+               tool: live.length ? live[0].last_tool : null, hint: c.hint});
+  }
+  for (const a of act) if (!rows.some(r => r.name === look(a.client).pretty))
+    rows.push({name: look(a.client).pretty, live: 1, last: a.last_seen, tool: a.last_tool});
+  rows.sort((a, b) => (b.live - a.live) || (b.last - a.last));
+  $("#live").innerHTML = rows.map(r => { const L = look(r.name);
+    const when = r.live ? (r.tool ? `last used ${esc(r.tool)} · ${ago(r.last)}` : `connected ${ago(r.last)}`)
+                        : (r.last ? `last used ${ago(r.last)} · ` : "") + "starts using it after a restart";
+    const badge = r.live ? `<span class="live"><span class="dot ok"></span>active now</span>` : `<span class="chip">ready</span>`;
+    return `<div class="ai" style="${r.live ? "" : "opacity:.75"}"><div class="av" style="background:${L.color}">${initials(L.pretty)}</div>
+      <div><div class="who">${esc(L.pretty)}</div><div class="when">${when}</div></div><div class="right">${badge}</div></div>`; }).join("")
+    || `<div class="empty"><b>No AI app set up yet</b>Connect one under AI apps, then restart it or start a new session there.</div>`;
+  $("#ai-sub").textContent = act.length ? `${act.length} active now` : rows.length ? `${rows.length} ready` : "none yet";
+  const navAi = $("#nav-ai"); navAi.hidden = !act.length; navAi.textContent = act.length;
+
+  // health
+  const dot = $("#h-dot"), txt = $("#h-text");
+  if (!F.length) { dot.className = "dot warn"; txt.textContent = "Add a folder to begin"; }
+  else if (busy) { dot.className = "dot busy"; txt.textContent = F.some(f => f.updating) ? "Indexing…" : "Running OCR…"; }
+  else { dot.className = "dot ok"; txt.textContent = "Up to date · " + ago(last); }
+  $("#ov-sub").textContent = act.length ? `${act.length} AI session${act.length > 1 ? "s" : ""} connected right now.` : "Everything your AI apps can find, at a glance.";
+
+  renderFolders();
+}
+
+function renderFolders() {
+  const all = state.folders;
+  const nf = $("#nav-folders"); nf.hidden = !all.length; nf.textContent = all.length;
+  if (!all.length) { $("#folders").innerHTML = `<div class="empty"><b>No folders yet</b>Pick a folder such as Downloads or Documents.<br><br><button class="btn primary sm" onclick="addFolder()">Add folder</button></div>`; return; }
+  $("#folders").innerHTML = all.map(f => {
+    const on = f.enabled !== false; const o = f.ocr || {};
+    const status = !on ? `<span class="chip">paused</span>` : f.updating ? `<span class="chip busy">indexing</span>` : f.never ? `<span class="chip warn">not indexed</span>` : `<span class="chip ok">indexed</span>`;
+    const facts = on && !f.never ? `<div class="facts"><span>${fmt(f.files)} files</span><span>${bytes(f.total_size)}</span><span>${fmt((f.by_status || {}).content)} readable</span><span>${fmt(o.done)} OCR'd</span><span>updated ${ago(f.last_update)}</span></div>` : "";
+    return `<div class="folder ${on ? "" : "off"}"><div class="ficon"><svg width="22" height="22"><use href="#i-folder"/></svg></div>
+      <div><div class="t">${esc(f.label)} ${status}</div><div class="p">${esc(f.root)}</div>${facts}</div>
+      <div class="acts" data-path="${esc(f.root)}">
+        <button class="btn sm" title="Update now" data-act="update" ${on && !f.updating ? "" : "disabled"}><svg width="14" height="14"><use href="#i-refresh"/></svg>Update</button>
+        <button class="btn sm ghost" title="Open in Explorer" data-act="open"><svg width="14" height="14"><use href="#i-open"/></svg></button>
+        <button class="btn sm ghost danger" title="Remove from index" data-act="remove"><svg width="14" height="14"><use href="#i-trash"/></svg></button>
+        <button class="switch ${on ? "on" : ""}" title="${on ? "Indexing on" : "Indexing off"}" data-act="toggle" data-on="${on ? 1 : 0}"></button>
+      </div></div>`;
+  }).join("");
+}
+$("#folders").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b || b.disabled) return;
+  const p = b.closest("[data-path]").dataset.path;
+  ({update: () => updateFolder(p), open: () => api().open_folder(p), remove: () => removeFolder(p),
+    toggle: () => toggleFolder(p, b.dataset.on !== "1")})[b.dataset.act]();
+});
+
+async function refresh() { try { state = await api().get_state(); render(); } catch (e) { console.error(e); } }
+async function updateAll() { const r = await api().update_all(); toast(r.started.length ? "Updating " + r.started.join(", ") : "Already up to date or updating"); refresh(); }
+async function updateFolder(p) { const r = await api().update_folder(p); toast(r.ok ? "Update started" : r.error); refresh(); }
+async function addFolder() { const r = await api().add_folder(); if (r.ok) { toast("Added " + r.path + " · indexing started"); refresh(); } else if (r.error) toast(r.error); }
+async function removeFolder(p) { if (!confirmInline(p)) return; await api().remove_folder(p); toast("Removed " + p); refresh(); }
+function confirmInline(p) { return window.confirm("Stop indexing this folder and delete its index?\n\n" + p + "\n\nYour files are not touched."); }
+async function toggleFolder(p, on) { await api().set_folder_enabled(p, on); refresh(); }
+document.querySelectorAll("#ocr-seg button").forEach(b => b.onclick = async () => {
+  const r = await api().ocr_speed(b.dataset.mode); toast(r.message.split("\n")[0]); setTimeout(refresh, 800); });
+
+// search
+let qTimer = null, qSeq = 0;
+$("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(runSearch, 180); });
+async function runSearch() {
+  const q = $("#q").value.trim(), seq = ++qSeq;
+  if (!q) { $("#hits").innerHTML = `<div class="empty"><b>Type to search</b>Every word must match; words match as prefixes.</div>`; $("#q-count").hidden = true; return; }
+  const hits = await api().search(q, 30); if (seq !== qSeq) return;
+  $("#q-count").hidden = false; $("#q-count").textContent = hits.length + (hits.length === 30 ? "+" : "") + " results";
+  if (!hits.length) { $("#hits").innerHTML = `<div class="empty"><b>No matches</b>Try fewer or shorter words.</div>`; return; }
+  const partial = hits[0].partial ? `<div class="empty" style="padding:10px">Showing partial matches: not every word was found.</div>` : "";
+  $("#hits").innerHTML = partial + hits.map(h => {
+    const sn = esc(h.snippet).replace(/\x02/g, "<mark>").replace(/\x03/g, "</mark>");
+    const c = EXT_COLORS[h.ext] || "#64748b";
+    return `<div class="hit" data-abs="${esc(h.abs)}" title="Double-click to open">
+      <div class="ext" style="background:${c}">${esc(h.ext.slice(0, 4) || "file")}</div>
+      <div><div class="n">${esc(h.name)}</div><div class="d">${esc(h.display)}</div>${sn ? `<div class="sn">${sn}</div>` : ""}</div>
+      <div class="side-meta"><span>${esc(h.size)} · ${esc(h.date)}</span>${h.ocr ? `<span class="chip info">OCR</span>` : ""}
+        <div class="hacts"><button class="btn sm" data-act="open">Open</button>
+        <button class="btn sm ghost" data-act="reveal">Show in folder</button></div></div></div>`;
+  }).join("");
+}
+$("#hits").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"), hit = e.target.closest("[data-abs]"); if (!b || !hit) return;
+  b.dataset.act === "open" ? api().open_file(hit.dataset.abs) : api().reveal_file(hit.dataset.abs);
+});
+$("#hits").addEventListener("dblclick", e => { const hit = e.target.closest("[data-abs]"); if (hit) api().open_file(hit.dataset.abs); });
+
+// AI apps
+async function loadClients(force) { clientsList = await api().get_clients(!!force); renderClients(); render(); }
+function renderClients() {
+  const act = (state && state.sessions.active) || [];
+  $("#apps").innerHTML = clientsList.map(c => {
+    const L = look(c.name); const liveNow = act.some(a => look(a.client).pretty === c.name);
+    let status = c.connected ? `<span class="chip ok" title="The index is set up in this app's config">ready${c.scope ? " · " + esc(c.scope) : ""}</span>` :
+      !c.supported ? `<span class="chip">not supported</span>` : c.installed ? `<span class="chip">not connected</span>` : `<span class="chip">not installed</span>`;
+    let btn = "";
+    if (c.supported && c.installed) btn = c.connected ? `<button class="btn sm danger" onclick="disconnectClient('${c.id}')">Remove</button>`
+                                                      : `<button class="btn sm primary" onclick="connectClient('${c.id}')">Connect</button>`;
+    return `<div class="card app-card ${c.installed || !c.supported ? "" : "dim"}"><div class="top"><div class="av" style="background:${L.color}">${initials(c.name)}</div>
+      <div><div class="nm">${esc(c.name)}</div>${liveNow ? `<span class="live"><span class="dot ok"></span>active now</span>` : `<span class="when" style="color:var(--faint);font-size:12px">${c.installed ? "detected on this PC" : c.supported ? "not found" : ""}</span>`}</div></div>
+      <div class="hint">${esc(c.error || c.hint)}</div><div class="foot">${status}${btn}</div></div>`;
+  }).join("");
+}
+async function connectClient(id) { const r = await api().connect_client(id); clientsList = r.clients; renderClients(); toast(r.message); }
+async function disconnectClient(id) { const r = await api().disconnect_client(id); clientsList = r.clients; renderClients(); toast(r.message); }
+
+// settings
+async function loadMeta() {
+  meta = await api().get_meta();
+  $("#ver").textContent = "v" + meta.version + " · MCP file index";
+  $("#autostart").classList.toggle("on", meta.autostart);
+  $("#autostart").disabled = !meta.autostart_supported;
+  $("#turbo-ds").textContent = `${meta.turbo_workers} parallel workers on this PC (${meta.cores} cores, ${meta.free_ram_mb ? (meta.free_ram_mb/1024).toFixed(1) + " GB RAM free" : "RAM unknown"}).`;
+  const oi = $("#ocr-inst"); oi.textContent = meta.ocr_installed ? "OCR ready" : "OCR not installed"; oi.className = "chip " + (meta.ocr_installed ? "ok" : "warn");
+  $("#cmd").textContent = meta.server_command; $("#datadir").textContent = meta.data_dir;
+}
+async function toggleAutostart() { const on = await api().set_autostart(!$("#autostart").classList.contains("on")); $("#autostart").classList.toggle("on", on); toast(on ? "Folder Index will start with Windows" : "Autostart turned off"); }
+async function copyCmd() { await api().copy_text(meta.server_command); toast("Command copied"); }
+
+window.addEventListener("pywebviewready", async () => {
+  await loadMeta(); await refresh(); loadClients(false);
+  setInterval(refresh, 1500);
+  setInterval(() => loadClients(false), 10000);
+});
+</script>
+</body>
+</html>

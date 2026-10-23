@@ -1,53 +1,54 @@
-"""MCP server (stdio). Opens the index read-only and refreshes it in a detached
-subprocess, so a long rebuild never blocks or corrupts the stdio channel."""
+"""MCP server (stdio). Opens the indexes read-only and refreshes them in detached
+subprocesses, so a long rebuild never blocks or corrupts the stdio channel."""
 
 from __future__ import annotations
 
-import time
-from contextlib import closing
+import atexit
 
 from mcp.server.mcpserver import MCPServer
 
-from . import indexer, query
-from .config import Settings
-
-AUTO_REFRESH_AFTER = 15 * 60  # seconds since the last update
+from . import presence
+from .library import Library
 
 
-def spawn_update(settings: Settings) -> bool:
-    """Background `update`; it chains into a background OCR pass when scans are queued."""
-    if indexer.is_updating(settings.db_path):
-        return False
-    indexer.spawn(settings, "update")
-    return True
+def build(lib: Library, auto_refresh: bool = True) -> MCPServer:
+    beat = presence.Heartbeat()
+    atexit.register(beat.close)
 
+    async def track_client(ctx, call_next):
+        """Record which AI app connected (from `initialize`) and when it was last active."""
+        if ctx.method == "initialize" and isinstance(ctx.params, dict):
+            info = ctx.params.get("clientInfo") or {}
+            beat.client(info.get("name"), info.get("version"))
+        name = ctx.params.get("name") if ctx.method == "tools/call" and isinstance(ctx.params, dict) else None
+        beat.touch(name)
+        return await call_next(ctx)
 
-def build(settings: Settings, auto_refresh: bool = True) -> MCPServer:
+    folders = ", ".join(str(f.root) for f in lib.folders) or "(none yet)"
+    labels = ("Paths are shown as <folder label>/<relative path>; labels: "
+              + ", ".join(f"{f.label} = {f.root}" for f in lib.folders) + ".") if lib.multi \
+        else "Paths are relative to the indexed folder."
     mcp = MCPServer(
         "folder-index",
         instructions=(
-            f"Full-text index of the folder {settings.root}. Use these tools instead of listing "
+            f"Full-text index of these folders: {folders}. Use these tools instead of listing "
             "directories or opening files to locate things: search_files for words in names or "
             "contents, find_files for name/type/date/size filters, read_file_text to read a "
-            "document's extracted text without opening it. Paths are relative to the root."
+            f"document's extracted text without opening it. {labels}"
         ),
+        middleware=[track_client],
     )
-    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-    indexer.connect(settings.db_path).close()  # make sure the schema exists
-
-    def db():
-        return closing(indexer.connect(settings.db_path, readonly=True))
 
     @mcp.tool()
     def search_files(query_text: str, ext: str = "", folder: str = "", kind: str = "",
                      modified_after: str = "", limit: int = 10) -> str:
         """Full-text search over file names, paths and extracted contents (PDF, Word, Excel,
-        PowerPoint, text, code, zip listings). Every word must match; words are prefix-matched.
-        FTS5 syntax ("exact phrase", OR, NOT) also works.
-        ext: comma list like "pdf,docx". folder: substring of the path. kind: document | text |
-        archive | image | media | binary | other. modified_after: YYYY-MM-DD."""
-        with db() as conn:
-            return query.search(conn, query_text, ext, folder, kind, modified_after, limit)
+        PowerPoint, text, code, zip listings, OCR'd scans and images). Every word must match;
+        words are prefix-matched. FTS5 syntax ("exact phrase", OR, NOT) also works.
+        ext: comma list like "pdf,docx". folder: substring of the path, or "<label>/..." to search
+        one indexed folder. kind: document | text | archive | image | media | binary | other.
+        modified_after: YYYY-MM-DD."""
+        return lib.search(query_text, ext, folder, kind, modified_after, limit)
 
     @mcp.tool()
     def find_files(name: str = "", ext: str = "", folder: str = "", kind: str = "",
@@ -55,34 +56,28 @@ def build(settings: Settings, auto_refresh: bool = True) -> MCPServer:
                    sort: str = "modified", limit: int = 20) -> str:
         """List files by metadata. name: substring or glob (e.g. "*invoice*2025*").
         sort: modified | oldest | size | name. Dates are YYYY-MM-DD. Also reports total count/size."""
-        with db() as conn:
-            return query.find(conn, name, ext, folder, kind, modified_after, modified_before,
-                              min_size_mb, sort, limit)
+        return lib.find(name, ext, folder, kind, modified_after, modified_before, min_size_mb, sort, limit)
 
     @mcp.tool()
     def read_file_text(path: str, offset: int = 0, length: int = 4000) -> str:
-        """Return the already-extracted text of an indexed file (relative path as shown in
-        results). Page through long files with offset."""
-        with db() as conn:
-            return query.read_text(conn, path, offset, length)
+        """Return the already-extracted text of an indexed file (path as shown in results, or an
+        absolute path). Page through long files with offset."""
+        return lib.read_text(path, offset, length)
 
     @mcp.tool()
     def recent_files(limit: int = 15, ext: str = "") -> str:
         """Most recently modified/downloaded files."""
-        with db() as conn:
-            return query.find(conn, ext=ext, sort="modified", limit=limit)
+        return lib.find(ext=ext, sort="modified", limit=limit)
 
     @mcp.tool()
     def find_duplicates(folder: str = "", limit: int = 20) -> str:
-        """Groups of byte-identical documents, largest waste first."""
-        with db() as conn:
-            return query.duplicates(conn, folder, limit)
+        """Groups of byte-identical documents (also across indexed folders), largest waste first."""
+        return lib.duplicates(folder, limit)
 
     @mcp.tool()
     def index_status() -> str:
-        """Root folder, file counts, last update, and update/OCR progress."""
-        with db() as conn:
-            return query.status(conn, settings.db_path)
+        """Indexed folders, file counts, last update, and update/OCR progress."""
+        return lib.status_text()
 
     @mcp.tool()
     def ocr_speed(mode: str = "turbo", workers: int = 0) -> str:
@@ -91,23 +86,21 @@ def build(settings: Settings, auto_refresh: bool = True) -> MCPServer:
         priority, fastest; "background" = one low-priority worker (default after updates);
         "pause" = stop OCR until resumed. workers: override the worker count (0 = auto).
         A running pass hands its remaining queue over without redoing finished files."""
-        return indexer.set_ocr_speed(settings, mode.lower().strip(), workers)
+        return lib.ocr_speed(mode, workers)
 
     @mcp.tool()
     def refresh_index() -> str:
-        """Start an incremental re-index in the background (only new/changed files are read).
-        Scanned PDFs and images found along the way are OCR'd afterwards, also in the background."""
-        if spawn_update(settings):
-            return "Re-index started in the background; results update as it progresses."
-        return "A re-index is already running."
+        """Start an incremental re-index of every folder in the background (only new/changed
+        files are read). Scanned PDFs and images found along the way are OCR'd afterwards."""
+        started = lib.refresh()
+        if started:
+            return "Re-index started in the background for: " + ", ".join(started)
+        return "A re-index is already running." if lib.folders else "No folders are indexed yet."
 
     if auto_refresh:
-        with closing(indexer.connect(settings.db_path)) as conn:
-            last = float(indexer.get_meta(conn, "last_update", "0") or 0)
-        if time.time() - last > AUTO_REFRESH_AFTER:
-            spawn_update(settings)
+        lib.refresh(only_stale=True)
     return mcp
 
 
-def serve(settings: Settings, auto_refresh: bool = True) -> None:
-    build(settings, auto_refresh).run()
+def serve(lib: Library, auto_refresh: bool = True) -> None:
+    build(lib, auto_refresh).run()

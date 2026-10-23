@@ -1,6 +1,6 @@
 [project]
 name = "folder-index-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local full-text index (SQLite FTS5) of any folder, exposed to Claude and other AI agents as an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,12 @@ ocr = [
     "winrt-Windows.Media.Ocr>=2.0; sys_platform == 'win32'",
     "winrt-Windows.Storage.Streams>=2.0; sys_platform == 'win32'",
 ]
+# desktop app: window + tray icon (`folder-index-app`)
+app = [
+    "folder-index-mcp[ocr]",
+    "pywebview>=5.0",
+    "pystray>=0.19",
+]
 
 [project.urls]
 Homepage = "https://github.com/git-raka/folder-index-mcp"
@@ -37,6 +43,9 @@ Issues = "https://github.com/git-raka/folder-index-mcp/issues"
 
 [project.scripts]
 folder-index = "folder_index.cli:main"
+
+[project.gui-scripts]
+folder-index-app = "folder_index.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -46,4 +55,4 @@ build-backend = "hatchling.build"
 packages = ["src/folder_index"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyinstaller>=6.10"]
