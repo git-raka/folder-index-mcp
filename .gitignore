@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# never commit an index: it contains the text of private files
+*.db
+*.db-wal
+*.db-shm
+*.lock
+!uv.lock
+*.log

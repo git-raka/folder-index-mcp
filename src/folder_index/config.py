@@ -1,0 +1,118 @@
+"""Index policy: what gets skipped, what gets metadata only, what gets full content."""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# Directories never walked at all (dependency caches, VCS internals, secret stores).
+EXCLUDED_DIRS = {
+    "node_modules", ".git", ".hg", ".svn", "__pycache__", ".venv", "venv",
+    "site-packages", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".gradle", ".next", ".nuxt", ".cache", ".idea", ".vs",
+    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".password-store",
+}
+
+# Files listed by name only; their contents are never read.
+SECRET_EXTS = {
+    ".pem", ".key", ".crt", ".cer", ".der", ".csr", ".p12", ".pfx", ".jks",
+    ".keystore", ".truststore", ".kdbx", ".ovpn", ".ppk", ".gpg", ".asc",
+}
+SECRET_NAMES = {
+    ".env", ".bash_history", ".zsh_history", ".python_history", ".netrc",
+    ".pgpass", ".git-credentials", "credentials", "id_rsa", "id_ed25519",
+    "id_ecdsa", "id_dsa", "known_hosts", "authorized_keys",
+}
+SECRET_NAME_GLOBS = ["id_rsa*", "id_ed25519*", ".env.*", "client_secret*", "*secrets.*",
+                     "secret.*", "*.secret", "*.tfstate", "*service-account*.json"]
+
+# A directory holding one of these is treated as a source-code tree: its files
+# are indexed by name only (except READMEs), so code does not drown documents.
+PROJECT_MARKERS = {
+    "package.json", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+    "settings.gradle", "Cargo.toml", "pyproject.toml", "setup.py", "composer.json",
+    "Gemfile", "CMakeLists.txt", "gradlew", "mvnw", "Dockerfile", "docker-compose.yml",
+    "docker-compose.yaml", ".gitignore", "Makefile", "build.xml", "go.env",
+    # licence/notice files mark an unpacked distribution (SDKs, Apache tarballs)
+    "LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE", "NOTICE", "NOTICE.txt", "COPYING",
+}
+
+LEGACY_OFFICE_EXTS = {".doc", ".xls", ".ppt"}
+DOC_EXTS = {".pdf", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm",
+            ".odt", ".ods", ".odp"} | LEGACY_OFFICE_EXTS
+ARCHIVE_EXTS = {".zip"}  # archives whose member list is indexed
+TEXT_EXTS = {
+    ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".json", ".jsonl",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties", ".xml",
+    ".html", ".htm", ".sql", ".log", ".sh", ".ps1", ".bat", ".cmd", ".py",
+    ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt", ".cs", ".php", ".rb",
+    ".rs", ".c", ".h", ".cpp", ".css", ".scss", ".vue", ".svelte", ".tf",
+    ".hcl", ".cypher", ".graphql", ".srt", ".vtt", ".eml", ".rtf", ".tex",
+}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic", ".tif", ".tiff"}
+MEDIA_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".webm"}
+
+MAX_DOC_BYTES = 80 * 1024 * 1024
+MAX_TEXT_BYTES = 2 * 1024 * 1024
+MAX_CHARS = 60_000
+MAX_PDF_PAGES = 60
+
+IGNORE_FILE = ".folderindexignore"
+
+
+def kind_of(ext: str) -> str:
+    if ext in DOC_EXTS:
+        return "document"
+    if ext in ARCHIVE_EXTS or ext in {".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".jar", ".war"}:
+        return "archive"
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in MEDIA_EXTS:
+        return "media"
+    if ext in TEXT_EXTS:
+        return "text"
+    if ext in {".exe", ".msi", ".dll", ".apk", ".dmg", ".iso", ".deb", ".rpm"}:
+        return "binary"
+    return "other"
+
+
+def is_secret(name: str, ext: str) -> bool:
+    low = name.lower()
+    if ext in SECRET_EXTS or low in SECRET_NAMES:
+        return True
+    return any(fnmatch.fnmatch(low, g) for g in SECRET_NAME_GLOBS)
+
+
+def default_db_path(root: Path) -> Path:
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
+    digest = hashlib.sha1(str(root).lower().encode()).hexdigest()[:8]
+    return Path(base) / "folder-index" / f"{root.name or 'root'}-{digest}.db"
+
+
+@dataclass
+class Settings:
+    root: Path
+    db_path: Path
+    ignore_globs: list[str] = field(default_factory=list)
+
+    @classmethod
+    def load(cls, root: str | os.PathLike, db_path: str | None = None) -> "Settings":
+        r = Path(root).expanduser().resolve()
+        globs: list[str] = []
+        ign = r / IGNORE_FILE
+        if ign.is_file():
+            for line in ign.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    globs.append(line.replace("\\", "/").strip("/"))
+        return cls(root=r, db_path=Path(db_path) if db_path else default_db_path(r), ignore_globs=globs)
+
+    def ignored(self, rel_posix: str) -> bool:
+        name = rel_posix.rsplit("/", 1)[-1]
+        for g in self.ignore_globs:
+            if fnmatch.fnmatch(rel_posix, g) or fnmatch.fnmatch(name, g):
+                return True
+        return False
