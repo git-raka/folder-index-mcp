@@ -20,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--root", default=os.environ.get("FOLDER_INDEX_ROOT"),
                     help="index just this folder (env FOLDER_INDEX_ROOT; default: all added folders)")
     ap.add_argument("--db", default=os.environ.get("FOLDER_INDEX_DB"),
-                    help="index file for --root (default: %%LOCALAPPDATA%%/folder-index/<name>-<hash>.db)")
+                    help="index file for --root (default: ~/.folder-index/<name>-<hash>.db)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("folders", help="list the indexed folders")
@@ -64,6 +64,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     multiprocessing.freeze_support()
+    config.migrate_legacy_data()
+    config.cleanup_after_migration()
     a = _parser().parse_args(argv)
     if hasattr(sys.stdout, "reconfigure") and a.cmd != "serve":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -80,10 +82,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if a.cmd == "remove":
         s = Settings.load(a.path)
+        problem = indexer.delete_index(s)
+        if problem and "next start" not in problem:
+            sys.exit(f"Not removed: {problem}.")
         removed = config.remove_root(a.path)
-        for suffix in (".db", ".db-wal", ".db-shm", ".log"):
-            s.db_path.with_suffix(suffix).unlink(missing_ok=True)
-        print(f"Removed {s.root}." if removed else f"{s.root} was not in the list.")
+        print((f"Removed {s.root}." if removed else f"{s.root} was not in the list.")
+              + (f" Note: {problem}." if problem else ""))
         return
     if a.cmd == "connect":
         from . import clients
@@ -110,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
             if not a.no_ocr and not stats.get("skipped"):
                 indexer.spawn_ocr_if_pending(f.settings, log=log)
     elif a.cmd == "ocr":
-        for f in lib.folders:
+        for f in lib.folders:  # each pass re-checks its folder's pause flag
             indexer.run_ocr(f.settings, log=log, limit=a.limit, mode=a.mode,
                             workers=a.workers or None, takeover=a.takeover)
     elif a.cmd == "ocr-speed":

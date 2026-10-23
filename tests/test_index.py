@@ -11,7 +11,8 @@ from folder_index.library import Library
 
 @pytest.fixture(autouse=True)
 def isolated_data_dir(tmp_path, monkeypatch):
-    """Keep the app config and heartbeats out of the real %LOCALAPPDATA%."""
+    """Keep the app config, indexes and heartbeats out of the real ~/.folder-index."""
+    monkeypatch.setenv("FOLDER_INDEX_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
 
 
@@ -114,12 +115,12 @@ def test_scanned_pdf_is_ocrd(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ocr, "load_engine", lambda: type("Fake", (), {"name": "fake"})())
     monkeypatch.setattr(ocr, "ocr_file", lambda engine, path, ext: "Scanned invoice number 4711")
-    stats = indexer.run_ocr(s, log=lambda m: None)
+    stats = indexer.run_ocr(s, log=lambda m: None, in_process=True)
     assert stats["done"] == 1
     lib = Library([s])
     assert "docs/scan.pdf" in lib.search("invoice 4711")
     assert "[OCR]" in lib.read_text("docs/scan.pdf")
-    assert indexer.run_ocr(s, log=lambda m: None)["done"] == 0  # nothing left in the queue
+    assert indexer.run_ocr(s, log=lambda m: None, in_process=True)["done"] == 0  # queue is empty
 
 
 def test_ocr_pause_stop_and_worker_count(tmp_path):
@@ -181,3 +182,110 @@ def test_lock_of_a_dead_process_is_ignored(tmp_path):
     assert not indexer.is_updating(s.db_path)
     assert not indexer.update(s, workers=1, log=lambda m: None).get("skipped")
     assert not lock.exists()
+
+
+def test_legacy_appdata_folder_is_migrated(tmp_path, monkeypatch):
+    legacy = tmp_path / "appdata" / "folder-index"
+    s = build(tmp_path)
+    legacy.mkdir(parents=True)
+    import shutil
+    shutil.copy(s.db_path, legacy / "Old-12345678.db")
+    (legacy / "config.json").write_text('{"roots": [{"path": "C:/x", "enabled": true}]}', encoding="utf-8")
+    (legacy / "Old-12345678.lock").write_text("1", encoding="utf-8")
+    monkeypatch.delenv("FOLDER_INDEX_HOME")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user"))
+    copied = config.migrate_legacy_data()
+    new = tmp_path / "user" / ".folder-index"
+    assert sorted(copied) == ["Old-12345678.db", "config.json"]
+    assert (new / "Old-12345678.db").stat().st_size > 0 and not (new / "Old-12345678.lock").exists()
+    assert config.migrate_legacy_data() == []  # only once
+
+
+
+# --- regressions from the independent QA pass ---------------------------------------------------
+
+def test_missing_folder_keeps_its_index(tmp_path):
+    s = build(tmp_path)
+    before = Library([s]).folder_stats(Library([s]).folders[0])["files"]
+    s.root.rename(tmp_path / "unplugged")
+    stats = indexer.update(s, workers=1, log=lambda m: None)
+    assert stats.get("missing") and stats.get("skipped")
+    lib = Library([s])
+    assert lib.folder_stats(lib.folders[0])["files"] == before
+    assert "not found or offline" in lib.status_text()
+
+
+def test_a_crashing_worker_only_fails_its_own_job():
+    results = {}
+    jobs = [(i, ("x = 1",)) for i in range(12)]
+    jobs[5] = (5, ("import os; os._exit(3)",))  # stands in for a native crash
+    indexer.run_isolated(exec, jobs, 2, lambda k, r, e: results.__setitem__(k, e))
+    assert len(results) == 12
+    assert results[5] and "crashed" in results[5]
+    assert all(results[k] is None for k in results if k != 5)
+
+
+def test_invalid_utf16_file_name_does_not_break_updates(tmp_path):
+    s = build(tmp_path)
+    try:
+        (s.root / "bad\ud800name.txt").write_bytes(b"x")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("this filesystem refuses such names")
+    stats = indexer.update(s, workers=1, log=lambda m: None)
+    assert not stats.get("skipped")
+    assert "contract.docx" in Library([s]).search("service agreement")
+
+
+def test_paused_folder_is_skipped_by_ocr(tmp_path):
+    s = build(tmp_path)
+    indexer.set_ocr_paused(s, True)
+    assert indexer.run_ocr(s, log=lambda m: None, in_process=True).get("paused")
+
+
+def test_text_decoding():
+    from folder_index.extract import decode_text
+
+    cut = ("x" * 9 + "josé").encode("utf-8")[:-1]  # read limit cut the é in half
+    assert decode_text(cut, truncated=True) == "x" * 9 + "jos"
+    assert decode_text("Rapport financier café".encode("cp1252")) == "Rapport financier café"
+    assert decode_text("hello world, UTF-16 note".encode("utf-16")) == "hello world, UTF-16 note"
+    assert decode_text(("no bom " * 20).encode("utf-16-le")).startswith("no bom")
+    assert decode_text(b"\x00\x01\x02binary\x00") == ""
+
+
+def test_lock_edge_cases(tmp_path):
+    lock = tmp_path / "x.lock"
+    lock.write_text("", encoding="utf-8")  # created but pid not written yet
+    assert indexer._lock_alive(lock)
+    assert indexer.clamp_workers(100) == indexer.MAX_WORKERS and indexer.clamp_workers(-3) == 1
+    assert indexer.clamp_workers("abc") == 1
+
+
+def test_more_secret_files_are_name_only():
+    for name in ("credentials.json", "token.json", "ConsoleHost_history.txt", "appsettings.Production.json",
+                 "wp-config.php", ".npmrc"):
+        assert config.is_secret(name.lower(), Path(name).suffix.lower()), name
+    assert not config.is_secret("corporate secretary.docx", ".docx")
+
+
+def test_remove_deletes_index_and_nested_folders_are_refused(tmp_path):
+    s = build(tmp_path)
+    assert indexer.delete_index(s) is None
+    assert not s.db_path.exists()
+    outer = tmp_path / "Outer"
+    (outer / "inner").mkdir(parents=True)
+    config.add_root(outer)
+    with pytest.raises(ValueError, match="overlaps"):
+        config.add_root(outer / "inner")
+
+
+def test_bad_inputs_get_friendly_answers(tmp_path):
+    s = build(tmp_path)
+    (s.root / "report[1].txt").write_text("bracketed name", encoding="utf-8")
+    indexer.update(s, workers=1, log=lambda m: None)
+    lib = Library([s])
+    assert "report[1].txt" in lib.find("report[1]")
+    assert "Invalid argument" in lib.search("kafka", modified_after="31-12-2025")
+    assert "docs/notes.txt" in lib.search("kafka\x00budget", limit="abc")
+    not_yet = Settings.load(tmp_path / "root", str(tmp_path / "never.db"))
+    assert "not in the index" in Library([not_yet]).read_text("docs/notes.txt")

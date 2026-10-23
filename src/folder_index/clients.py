@@ -163,7 +163,10 @@ def connect(cid: str) -> str:
         data = _load(path)
     except ValueError:
         return f"{c['name']}: {path} is not plain JSON (comments?); add the server by hand."
-    data.setdefault(c["key"], {})[NAME] = _entry("std" if c["style"] == "claude-code" else c["style"])
+    if not isinstance(data, dict) or not isinstance(data.get(c["key"]) or {}, dict):
+        return f"{c['name']}: {path} has an unexpected layout; add the server by hand."
+    data[c["key"]] = data.get(c["key"]) or {}
+    data[c["key"]][NAME] = _entry("std" if c["style"] == "claude-code" else c["style"])
     path.parent.mkdir(parents=True, exist_ok=True)
     _save(path, data)
     return f"{c['name']}: set up in {path}. {c['hint']}"
@@ -183,7 +186,8 @@ def disconnect(cid: str) -> str:
         data = _load(path)
     except ValueError:
         return f"{c['name']}: {path} is not plain JSON; remove the entry by hand."
-    if NAME in (data.get(c["key"]) or {}):
-        del data[c["key"]][NAME]
+    servers = data.get(c["key"]) if isinstance(data, dict) else None
+    if isinstance(servers, dict) and NAME in servers:
+        del servers[NAME]
         _save(path, data)
     return f"{c['name']}: removed."

@@ -342,6 +342,7 @@ document.querySelectorAll(".nav").forEach(b => b.onclick = () => go(b.dataset.vi
 
 // known MCP client names -> pretty name + colour
 const CLIENT_LOOK = [
+  [/local-agent-mode/i, "Claude Code (desktop app)", "#d97757"],
   [/claude[- ]?code/i, "Claude Code", "#d97757"], [/claude/i, "Claude Desktop", "#d97757"],
   [/gemini/i, "Gemini CLI", "#4285f4"], [/cursor/i, "Cursor", "#52525b"], [/windsurf|codeium/i, "Windsurf", "#0ea5a4"],
   [/insiders/i, "VS Code Insiders", "#24bfa5"], [/visual studio code|vscode|copilot/i, "VS Code", "#007acc"],
@@ -376,6 +377,8 @@ function render() {
   // activity
   const jobs = F.map(f => {
     let html = `<div class="job"><div class="top"><span class="name">${esc(f.label)}</span><span class="path">${esc(f.root)}</span>`;
+    if (f.missing) return html + `<span class="meta"><span class="chip warn">folder not found</span></span></div>
+      <div class="lbl"><span>Offline or moved. The last index (${fmt(f.files)} files) is kept until it is back.</span><span></span></div></div>`;
     if (f.never && !f.updating) return html + `<span class="meta"><span class="chip warn">not indexed</span></span></div></div>`;
     const o = f.ocr || {};
     let chip = `<span class="chip ok">up to date</span>`;
@@ -413,7 +416,7 @@ function render() {
   $("#act-sub").textContent = busy ? `${busy} running` : "idle";
 
   // AI apps: everything set up, live ones first; plus any live client we didn't set up ourselves
-  const act = (state.sessions.active || []);
+  const act = (state.sessions.active || []).filter(a => a.client);  // skip servers still waiting for a handshake
   const hist = state.sessions.history || {};
   const liveBy = name => act.filter(a => look(a.client).pretty === name);
   const rows = [];
@@ -452,7 +455,7 @@ function renderFolders() {
   if (!all.length) { $("#folders").innerHTML = `<div class="empty"><b>No folders yet</b>Pick a folder such as Downloads or Documents.<br><br><button class="btn primary sm" onclick="addFolder()">Add folder</button></div>`; return; }
   $("#folders").innerHTML = all.map(f => {
     const on = f.enabled !== false; const o = f.ocr || {};
-    const status = !on ? `<span class="chip">paused</span>` : f.updating ? `<span class="chip busy">indexing</span>` : f.never ? `<span class="chip warn">not indexed</span>` : `<span class="chip ok">indexed</span>`;
+    const status = !on ? `<span class="chip">paused</span>` : f.missing ? `<span class="chip warn">not found</span>` : f.updating ? `<span class="chip busy">indexing</span>` : f.never ? `<span class="chip warn">not indexed</span>` : `<span class="chip ok">indexed</span>`;
     const facts = on && !f.never ? `<div class="facts"><span>${fmt(f.files)} files</span><span>${bytes(f.total_size)}</span><span>${fmt((f.by_status || {}).content)} readable</span><span>${fmt(o.done)} OCR'd</span><span>updated ${ago(f.last_update)}</span></div>` : "";
     return `<div class="folder ${on ? "" : "off"}"><div class="ficon"><svg width="22" height="22"><use href="#i-folder"/></svg></div>
       <div><div class="t">${esc(f.label)} ${status}</div><div class="p">${esc(f.root)}</div>${facts}</div>
@@ -475,7 +478,8 @@ async function refresh() { try { state = await api().get_state(); render(); } ca
 async function updateAll() { const r = await api().update_all(); toast(r.started.length ? "Updating " + r.started.join(", ") : "Already up to date or updating"); refresh(); }
 async function updateFolder(p) { const r = await api().update_folder(p); toast(r.ok ? "Update started" : r.error); refresh(); }
 async function addFolder() { const r = await api().add_folder(); if (r.ok) { toast("Added " + r.path + " · indexing started"); refresh(); } else if (r.error) toast(r.error); }
-async function removeFolder(p) { if (!confirmInline(p)) return; await api().remove_folder(p); toast("Removed " + p); refresh(); }
+async function removeFolder(p) { if (!confirmInline(p)) return; const r = await api().remove_folder(p);
+  toast(r.ok ? "Removed " + p + (r.note ? " (" + r.note + ")" : "") : r.error); refresh(); }
 function confirmInline(p) { return window.confirm("Stop indexing this folder and delete its index?\n\n" + p + "\n\nYour files are not touched."); }
 async function toggleFolder(p, on) { await api().set_folder_enabled(p, on); refresh(); }
 document.querySelectorAll("#ocr-seg button").forEach(b => b.onclick = async () => {
@@ -511,7 +515,7 @@ $("#hits").addEventListener("dblclick", e => { const hit = e.target.closest("[da
 // AI apps
 async function loadClients(force) { clientsList = await api().get_clients(!!force); renderClients(); render(); }
 function renderClients() {
-  const act = (state && state.sessions.active) || [];
+  const act = ((state && state.sessions.active) || []).filter(a => a.client);
   $("#apps").innerHTML = clientsList.map(c => {
     const L = look(c.name); const liveNow = act.some(a => look(a.client).pretty === c.name);
     let status = c.connected ? `<span class="chip ok" title="The index is set up in this app's config">ready${c.scope ? " · " + esc(c.scope) : ""}</span>` :

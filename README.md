@@ -17,7 +17,7 @@ Without an index, an agent has to run `ls` and `grep` and open PDFs one by one, 
 - **Reads contents**: PDF, Word, Excel, PowerPoint, OpenDocument, legacy `.doc/.xls/.ppt` (best effort), plain text, code, and the file listing inside `.zip` archives.
 - **OCR for scans and images** (optional): scanned PDFs and screenshots/photos are OCR'd in the background, newest first, using the OCR engine built into Windows or `tesseract` anywhere else. A turbo mode uses every CPU core.
 - **Incremental**: only new or changed files are re-read, and deleted files are dropped. Text extraction runs in parallel.
-- **Safe by default**: `.ssh`, `.git`, `node_modules`, virtualenvs and caches are never walked. Keys, certificates, VPN profiles, `.env` files and shell history are listed by name only, and their content is never read. Indexes live outside the indexed folders (`%LOCALAPPDATA%\folder-index\` on Windows, `~/.local/share/folder-index/` elsewhere), and nothing leaves your machine.
+- **Safe by default**: `.ssh`, `.git`, `node_modules`, virtualenvs and caches are never walked. Keys, certificates, VPN profiles, `.env` files and shell history are listed by name only, and their content is never read. Indexes live outside the indexed folders, in `~/.folder-index` (`C:\Users\<you>\.folder-index` on Windows), and nothing leaves your machine.
 - **Code-aware**: a folder containing `package.json`, `go.mod`, `pom.xml`, a `LICENSE` and so on is treated as a source tree or unpacked distribution. Its files are indexed by name only, except office documents and the top-level README, so extracted repos and SDKs don't drown your documents.
 
 ## Desktop app (Windows)
@@ -145,6 +145,16 @@ folder-index ocr-speed background         # resume quietly
 ```
 
 Switching modes hands the queue over without redoing anything. The running pass stops after the file(s) in progress, and every finished file is already saved. As a reference point, on a 24-core laptop with Windows OCR, `background` handles about 1 file/s and `turbo` (23 workers) about 25 files/s.
+
+## Where data lives
+
+Everything (the folder list, one index per folder, logs, and which AI apps are connected) is kept in `~/.folder-index`. Set `FOLDER_INDEX_HOME` to use another location.
+
+It is deliberately not under `AppData`. AI apps installed as MSIX packages, such as Claude Desktop from the Microsoft Store, have their `AppData` writes redirected into a private per-package folder. The MCP server they start would then see different data from the desktop app. Version 0.3.0 kept data in `%LOCALAPPDATA%\folder-index`; newer versions copy it over on first start and remove the old copy afterwards.
+
+A folder that is missing or offline, such as an unplugged drive or a disconnected share, is skipped and its index kept until it is back. It is never treated as empty.
+
+A file whose extraction or OCR crashes its worker process (a damaged PDF, for example) is marked as unreadable on its own; the rest of the batch carries on.
 
 ## Customising what gets indexed
 

@@ -14,6 +14,20 @@ from .config import Settings
 AUTO_REFRESH_AFTER = 15 * 60  # seconds since a folder's last update
 
 
+def _int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 @dataclass
 class Folder:
     label: str
@@ -100,7 +114,8 @@ class Library:
     def search_hits(self, text: str, ext: str = "", folder: str = "", kind: str = "",
                     modified_after: str = "", limit: int = 10,
                     marks: tuple[str, str] = ("[", "]")) -> tuple[list[tuple[Folder, object]], bool]:
-        limit = max(1, min(int(limit), 50))
+        limit = max(1, min(_int(limit, 10), 50))
+        text = query.clean_query(text)
         scope = self._scope(folder)
         for relaxed in (False, True):
             if relaxed and query.term_count(text) < 2:
@@ -117,7 +132,10 @@ class Library:
 
     def search(self, text: str, ext: str = "", folder: str = "", kind: str = "",
                modified_after: str = "", limit: int = 10) -> str:
-        hits, relaxed = self.search_hits(text, ext, folder, kind, modified_after, limit)
+        try:
+            hits, relaxed = self.search_hits(text, ext, folder, kind, modified_after, _int(limit, 10))
+        except ValueError as exc:
+            return f"Invalid argument: {exc}. Dates are YYYY-MM-DD."
         if not hits:
             return f"No files match {text!r}." + self._staleness()
         mode = " (partial matches: not every word was found)" if relaxed else ""
@@ -128,13 +146,16 @@ class Library:
     def find(self, name: str = "", ext: str = "", folder: str = "", kind: str = "",
              modified_after: str = "", modified_before: str = "", min_size_mb: float = 0,
              sort: str = "modified", limit: int = 20) -> str:
-        limit = max(1, min(int(limit), 200))
+        limit = max(1, min(_int(limit, 20), 200))
         sort = sort if sort in query.SORTS else "modified"
         hits, count, size = [], 0, 0
         for f, sub in self._scope(folder):
             with self._open(f) as conn:
-                rows, c, s = query.find_rows(conn, name, ext, sub, kind, modified_after, modified_before,
-                                             min_size_mb, sort, limit)
+                try:
+                    rows, c, s = query.find_rows(conn, name, ext, sub, kind, modified_after, modified_before,
+                                                 _float(min_size_mb), sort, limit)
+                except ValueError as exc:
+                    return f"Invalid argument: {exc}. Dates are YYYY-MM-DD."
             hits += [(f, r) for r in rows]
             count += c
             size += s
@@ -148,7 +169,7 @@ class Library:
     def read_text(self, path: str, offset: int = 0, length: int = 4000) -> str:
         found = self.resolve(path)
         row = None
-        if found:
+        if found and found[0].settings.db_path.exists():
             f, rel = found
             with self._open(f) as conn:
                 row = query.get_row(conn, rel)
@@ -170,6 +191,7 @@ class Library:
         return f"{head}\n---\n{chunk}{tail}"
 
     def duplicates(self, folder: str = "", limit: int = 20) -> str:
+        limit = _int(limit, 20)
         groups: dict[str, list] = {}
         for f, sub in self._scope(folder):
             with self._open(f) as conn:
@@ -189,13 +211,15 @@ class Library:
     # --- status --------------------------------------------------------------
 
     def folder_stats(self, f: Folder) -> dict:
+        missing = not f.root.is_dir()
         if not f.settings.db_path.exists():
             return {"root": str(f.root), "label": f.label, "never": True, "last_update": 0,
-                    "updating": indexer.is_updating(f.settings.db_path), "files": 0}
+                    "updating": indexer.is_updating(f.settings.db_path), "files": 0, "missing": missing}
         with self._open(f) as conn:
             st = query.stats(conn, f.settings.db_path)
         st["label"] = f.label
         st["root"] = str(f.root)
+        st["missing"] = missing
         return st
 
     def status_text(self) -> str:
@@ -210,6 +234,8 @@ class Library:
                 continue
             last = st["last_update"]
             o = st["ocr"]
+            missing = "  Folder not found or offline: showing the last index; it is kept until the folder is back.\n" \
+                if st["missing"] else ""
             if o["running"]:
                 ocr_state = f"running: {o['mode'] or 'starting'}"
             else:
@@ -218,7 +244,7 @@ class Library:
                         f"empty {o['empty']:,}, failed {o['failed']:,}")
             if not o["installed"] and not o["pending"]:
                 ocr_line = "OCR: not installed"
-            blocks.append("\n".join([
+            blocks.append(missing.join(["", "\n".join([
                 f"[{f.label}] {f.root}",
                 f"  Index: {st['db_path']} ({query.human(st['db_size'])})",
                 f"  Last update: {time.strftime('%Y-%m-%d %H:%M', time.localtime(last))}" if last
@@ -228,7 +254,7 @@ class Library:
                 f"  Files: {st['files']:,} — " + ", ".join(f"{k} {v:,}" for k, v in sorted(st["by_status"].items())),
                 "  By kind: " + ", ".join(f"{k} {v:,}" for k, v in
                                           sorted(st["by_kind"].items(), key=lambda kv: -kv[1])),
-            ]))
+            ])]))
         return "\n".join(blocks)
 
     # --- actions -------------------------------------------------------------
@@ -249,7 +275,8 @@ class Library:
         return started
 
     def ocr_speed(self, mode: str, workers: int = 0) -> str:
-        mode = mode.lower().strip()
+        mode = str(mode).lower().strip()
+        workers = indexer.clamp_workers(workers) if _int(workers, 0) > 0 else 0
         if mode not in ("pause", *indexer.OCR_MODES):
             return f"Unknown mode {mode!r}; use background, turbo or pause."
         if not self.folders:

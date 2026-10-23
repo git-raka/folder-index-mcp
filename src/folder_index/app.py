@@ -181,15 +181,11 @@ class Api:
 
     def remove_folder(self, path: str) -> dict:
         s = Settings.load(path)
-        indexer.stop_ocr(s, wait=0)
+        problem = indexer.delete_index(s)
+        if problem and "next start" not in problem:
+            return {"ok": False, "error": f"Not removed: {problem}."}
         config.remove_root(path)
-        if not indexer.is_updating(s.db_path):
-            for suffix in (".db", ".db-wal", ".db-shm", ".log", ".ocr.stop"):
-                try:
-                    s.db_path.with_suffix(suffix).unlink(missing_ok=True)
-                except OSError:
-                    pass
-        return {"ok": True}
+        return {"ok": True, "note": problem}
 
     def set_folder_enabled(self, path: str, enabled: bool) -> dict:
         config.set_root_enabled(path, enabled)
@@ -315,6 +311,8 @@ def _log_to_file() -> None:
 
 def main() -> None:
     multiprocessing.freeze_support()
+    config.migrate_legacy_data()
+    config.cleanup_after_migration()
     _log_to_file()
     import logging
 

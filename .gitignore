@@ -19,3 +19,4 @@ dist/
 packaging/build/
 packaging/dist/
 packaging/dist-new/
+packaging/release/

@@ -1,6 +1,6 @@
 [project]
 name = "folder-index-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local full-text index (SQLite FTS5) of any folder, exposed to Claude and other AI agents as an MCP server."
 readme = "README.md"
 requires-python = ">=3.10"

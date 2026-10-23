@@ -88,19 +88,43 @@ def _archive_listing(path: Path) -> str:
     return "Archive contents:\n" + "\n".join(shown) + more
 
 
+def _looks_utf16(head: bytes) -> str | None:
+    """'utf-16-le'/'utf-16-be' for BOM-less UTF-16 text (NULs on one side of each pair)."""
+    if len(head) < 64:
+        return None
+    even, odd = head[0::2], head[1::2]
+    if odd.count(0) > 0.6 * len(odd) and even.count(0) < 0.1 * len(even):
+        return "utf-16-le"
+    if even.count(0) > 0.6 * len(even) and odd.count(0) < 0.1 * len(odd):
+        return "utf-16-be"
+    return None
+
+
+def decode_text(raw: bytes, truncated: bool = False) -> str:
+    """Decode text of unknown encoding: BOMs first, then UTF-8 (tolerating a character cut by the
+    read limit), else Windows-1252. Returns "" for binary data."""
+    import codecs
+
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw[3:].decode("utf-8", errors="replace")
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16", errors="replace")
+    if enc := _looks_utf16(raw[:4096]):
+        return raw.decode(enc, errors="replace")
+    if b"\x00" in raw[:4096]:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if truncated and exc.start >= len(raw) - 3:  # the read limit cut a multi-byte character
+            return raw[:exc.start].decode("utf-8")
+    return raw.decode("cp1252", errors="replace")
+
+
 def _plain(path: Path) -> str:
     with open(path, "rb") as f:
         raw = f.read(config.MAX_TEXT_BYTES)
-    if b"\x00" in raw[:4096]:
-        return ""
-    for enc in ("utf-8", "utf-16", "cp1252"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        text = raw.decode("utf-8", errors="ignore")
+    text = decode_text(raw, truncated=len(raw) >= config.MAX_TEXT_BYTES)
     if path.suffix.lower() in {".html", ".htm", ".xml"}:
         text = html.unescape(_TAG.sub(" ", text))
     return text

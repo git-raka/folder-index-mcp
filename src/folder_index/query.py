@@ -58,6 +58,12 @@ def filters(ext: str = "", folder: str = "", kind: str = "", modified_after: str
 
 
 _TERM = re.compile(r"[^\s\"'()*:^+]+", re.U)
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_query(q: str) -> str:
+    """Drop control characters (NUL breaks FTS5) and cap the length."""
+    return _CONTROL.sub(" ", str(q))[:2000]
 
 
 def term_count(q: str) -> int:
@@ -102,9 +108,9 @@ def find_rows(conn: sqlite3.Connection, name: str = "", ext: str = "", folder: s
     """Rows plus the total count and size of everything matching."""
     where, args = filters(ext, folder, kind, modified_after, modified_before, min_size_mb)
     if name:
-        pattern = name.replace("\\", "/")
+        pattern = clean_query(name).replace("\\", "/")
         if not any(c in pattern for c in "*?"):
-            pattern = f"*{pattern}*"
+            pattern = "*" + pattern.replace("[", "[[]") + "*"  # plain text: '[' is literal
         where += " AND lower(f.name) GLOB ?"
         args.append(pattern.lower())
     order = SORTS.get(sort, SORTS["modified"])[0]

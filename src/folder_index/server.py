@@ -15,13 +15,25 @@ def build(lib: Library, auto_refresh: bool = True) -> MCPServer:
     beat = presence.Heartbeat()
     atexit.register(beat.close)
 
+    def _get(obj, *keys):
+        """Read a field from raw params (dict) or a validated model, whichever we were given."""
+        for key in keys:
+            value = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+            if value is not None:
+                return value
+        return None
+
     async def track_client(ctx, call_next):
         """Record which AI app connected (from `initialize`) and when it was last active."""
-        if ctx.method == "initialize" and isinstance(ctx.params, dict):
-            info = ctx.params.get("clientInfo") or {}
-            beat.client(info.get("name"), info.get("version"))
-        name = ctx.params.get("name") if ctx.method == "tools/call" and isinstance(ctx.params, dict) else None
-        beat.touch(name)
+        if beat.data["client"] is None:
+            info = _get(ctx.params, "clientInfo", "client_info") if ctx.method == "initialize" else None
+            if info is None:  # handshake seen by another path: ask the connection
+                conn = getattr(ctx, "connection", None)
+                info = _get(getattr(conn, "client_params", None), "client_info", "clientInfo")
+            if info is not None:
+                beat.client(_get(info, "name"), _get(info, "version"))
+        tool = _get(ctx.params, "name") if ctx.method == "tools/call" else None
+        beat.touch(tool)
         return await call_next(ctx)
 
     folders = ", ".join(str(f.root) for f in lib.folders) or "(none yet)"

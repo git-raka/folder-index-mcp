@@ -25,9 +25,12 @@ SECRET_NAMES = {
     ".env", ".bash_history", ".zsh_history", ".python_history", ".netrc",
     ".pgpass", ".git-credentials", "credentials", "id_rsa", "id_ed25519",
     "id_ecdsa", "id_dsa", "known_hosts", "authorized_keys",
+    "credentials.json", "token.json", "consolehost_history.txt", "wp-config.php",
+    ".npmrc", ".pypirc", ".dockercfg", "web.config",
 }
 SECRET_NAME_GLOBS = ["id_rsa*", "id_ed25519*", ".env.*", "client_secret*", "*secrets.*",
-                     "secret.*", "*.secret", "*.tfstate", "*service-account*.json"]
+                     "secret.*", "*.secret", "*.tfstate", "*service-account*.json",
+                     "*_history", "*_history.txt", "appsettings*.json", "*.keytab"]
 
 # A directory holding one of these is treated as a source-code tree: its files
 # are indexed by name only (except READMEs), so code does not drown documents.
@@ -94,9 +97,8 @@ def is_secret(name: str, ext: str) -> bool:
 
 
 def default_db_path(root: Path) -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
     digest = hashlib.sha1(str(root).lower().encode()).hexdigest()[:8]
-    return Path(base) / "folder-index" / f"{root.name or 'root'}-{digest}.db"
+    return data_dir() / f"{root.name or 'root'}-{digest}.db"
 
 
 @dataclass
@@ -128,8 +130,94 @@ class Settings:
 # --- app-wide config: the list of indexed folders --------------------------
 
 def data_dir() -> Path:
+    """Where config, indexes and heartbeats live: ~/.folder-index (env FOLDER_INDEX_HOME).
+
+    Deliberately not under AppData: AI apps installed as MSIX packages (e.g. Claude Desktop from
+    the Microsoft Store) have their AppData writes redirected into a private per-package folder,
+    so an MCP server they start and the desktop app would otherwise see different data."""
+    override = os.environ.get("FOLDER_INDEX_HOME")
+    return Path(override) if override else Path.home() / ".folder-index"
+
+
+def _legacy_data_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
     return Path(base) / "folder-index"
+
+
+def migrate_legacy_data() -> list[str]:
+    """One-time copy of a 0.3.0 data folder (AppData) into data_dir(). Safe while indexes are open:
+    databases are copied with SQLite's online backup. The old folder is left in place."""
+    import shutil
+    import sqlite3
+
+    new, old = data_dir(), _legacy_data_dir()
+    if os.environ.get("FOLDER_INDEX_HOME") or (new / "config.json").exists() or not old.is_dir():
+        return []
+    copied, failed = [], False
+    new.mkdir(parents=True, exist_ok=True)
+    # config.json goes last and only when everything else made it, so a failed copy is retried
+    items = sorted(old.iterdir(), key=lambda i: i.name == "config.json")
+    for item in items:
+        target = new / item.name
+        if item.name == "config.json" and failed:
+            break
+        if target.exists() or item.suffix in (".lock", ".tmp", ".stop") or item.name.endswith(("-wal", "-shm")):
+            continue
+        try:
+            if item.suffix == ".db":
+                src = sqlite3.connect(f"file:{item.as_posix()}?mode=ro", uri=True, timeout=30)
+                dst = sqlite3.connect(target)
+                with dst:
+                    src.backup(dst)
+                src.close()
+                dst.close()
+            elif item.is_dir():
+                if item.name == "clients":
+                    continue  # live heartbeats belong to the processes that wrote them
+                shutil.copytree(item, target)
+            else:
+                shutil.copy2(item, target)
+            copied.append(item.name)
+        except (OSError, sqlite3.Error):
+            failed = True
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return copied
+
+
+def cleanup_after_migration() -> None:
+    """Delete the old AppData copies once ~/.folder-index is in use, plus any index files a
+    removed folder left behind because they were open. Best effort; retried on every start."""
+    old = _legacy_data_dir()
+    if not os.environ.get("FOLDER_INDEX_HOME") and (data_dir() / "config.json").exists() and old.is_dir():
+        for item in old.iterdir():
+            if item.is_file() and item.name != "app.log":
+                try:
+                    item.unlink()
+                except OSError:
+                    pass  # still open in an older server; next time
+    cfg_path = config_path()
+    if not cfg_path.exists():
+        return
+    cfg = load_app_config()
+    pending = cfg.get("pending_delete") or []
+    if pending:
+        left = []
+        for f in pending:
+            try:
+                Path(f).unlink(missing_ok=True)
+            except OSError:
+                left.append(f)
+        cfg["pending_delete"] = left
+        save_app_config(cfg)
+
+
+def remember_pending_delete(paths: list[str]) -> None:
+    cfg = load_app_config()
+    cfg["pending_delete"] = sorted(set(cfg.get("pending_delete") or []) | set(paths))
+    save_app_config(cfg)
 
 
 def config_path() -> Path:
@@ -167,6 +255,11 @@ def add_root(path: str | os.PathLike) -> Path:
     if not p.is_dir():
         raise ValueError(f"not a folder: {p}")
     cfg = load_app_config()
+    for r in cfg["roots"]:
+        other = Path(r["path"])
+        if other != p and (other in p.parents or p in other.parents):
+            raise ValueError(f"{p} overlaps {other}, which is already indexed; "
+                             "remove one of them first (files would be indexed twice)")
     if not any(Path(r["path"]) == p for r in cfg["roots"]):
         cfg["roots"].append({"path": str(p), "enabled": True})
         save_app_config(cfg)

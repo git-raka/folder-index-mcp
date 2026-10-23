@@ -9,7 +9,8 @@ import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,8 +98,22 @@ def _plan(name: str, ext: str, size: int, code_root: Path | None, parent: Path) 
     return "metadata"
 
 
+class RootUnavailable(OSError):
+    """The indexed folder is missing or unreadable (unplugged drive, offline share, deleted)."""
+
+
+def _encodable(name: str) -> bool:
+    try:
+        name.encode("utf-8")
+        return True
+    except UnicodeEncodeError:  # lone surrogate: an invalid UTF-16 name on Windows
+        return False
+
+
 def scan(settings: Settings, skip: set[Path] = frozenset()) -> list[Entry]:
-    """Walk the root without following links; prune excluded/ignored directories."""
+    """Walk the root without following links; prune excluded/ignored directories.
+    Raises RootUnavailable when the root itself cannot be listed, so callers never mistake an
+    offline folder for an empty one."""
     root = settings.root
     out: list[Entry] = []
     stack: list[tuple[Path, Path | None]] = [(root, None)]  # (dir, root of enclosing code tree)
@@ -106,8 +121,10 @@ def scan(settings: Settings, skip: set[Path] = frozenset()) -> list[Entry]:
         d, code_root = stack.pop()
         try:
             with os.scandir(d) as it:
-                items = list(it)
-        except OSError:
+                items = [e for e in it if _encodable(e.name)]
+        except OSError as exc:
+            if d == root:
+                raise RootUnavailable(f"cannot read {root}: {exc}") from exc
             continue
         if d != root and code_root is None and any(
                 e.name in config.PROJECT_MARKERS for e in items if e.is_file(follow_symlinks=False)):
@@ -159,24 +176,38 @@ class UpdateLock:
     def __enter__(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists() and not _lock_alive(self.path):
-            self.path.unlink(missing_ok=True)  # left behind by a killed process
+            try:
+                self.path.unlink()  # left behind by a killed process
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False  # someone else is touching it right now; treat as taken
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
             self.held = True
-        except FileExistsError:
+        except OSError:  # exists, or briefly locked by a reader on Windows
             self.held = False
         return self.held
 
     def touch(self) -> None:
         """Long jobs call this so their lock never looks stale."""
         if self.held:
-            os.utime(self.path)
+            try:
+                os.utime(self.path)
+            except OSError:
+                pass
 
     def __exit__(self, *exc) -> None:
-        if self.held:
-            self.path.unlink(missing_ok=True)
+        if not self.held:
+            return
+        for _ in range(40):  # a reader may hold the file open for a moment (WinError 32)
+            try:
+                self.path.unlink(missing_ok=True)
+                return
+            except OSError:
+                time.sleep(0.05)
 
 
 def _lock_alive(lock: Path) -> bool:
@@ -185,11 +216,17 @@ def _lock_alive(lock: Path) -> bool:
     from .presence import pid_alive
 
     try:
-        if time.time() - lock.stat().st_mtime > UpdateLock.STALE_SECONDS:
-            return False
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return False  # no lock
+    if age > UpdateLock.STALE_SECONDS:
+        return False
+    try:
         pid = int(lock.read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
-        return False
+        pid = 0
+    if not pid:  # just created and not written yet, or briefly unreadable: trust a fresh lock
+        return age < 30
     return pid == os.getpid() or pid_alive(pid)
 
 
@@ -244,15 +281,93 @@ def spawn_cli(args: list[str], log_path: Path, low_priority: bool = True) -> Non
         subprocess.Popen(cmd, creationflags=flags, **kw)
 
 
+MAX_WORKERS = 32  # ProcessPoolExecutor refuses more than 61 on Windows
+
+
+def clamp_workers(n) -> int:
+    try:
+        return max(1, min(int(n), MAX_WORKERS))
+    except (TypeError, ValueError):
+        return 1
+
+
+def run_isolated(fn, jobs, n_workers: int, on_result, should_stop=lambda: False,
+                 initializer=None, initargs=()) -> bool:
+    """Run fn(*args) for every (key, args) job in worker processes, at most 2*n in flight.
+    on_result(key, result, error) is called in this process. If a worker dies (native crash,
+    out of memory), the jobs that were in flight are re-run one at a time in fresh processes,
+    so only the file that really crashes is reported. Returns True if stopped early."""
+    pending = list(reversed(jobs))
+    suspects: list = []
+    stopped = False
+    while (pending or suspects) and not stopped:
+        if suspects:
+            key, args = suspects.pop()
+            try:
+                with ProcessPoolExecutor(1, initializer=initializer, initargs=initargs) as solo:
+                    result = solo.submit(fn, *args).result()
+                on_result(key, result, None)
+            except BrokenProcessPool:
+                on_result(key, None, "worker process crashed on this file")
+            except Exception as exc:
+                on_result(key, None, f"{type(exc).__name__}: {exc}"[:300])
+            stopped = should_stop()
+            continue
+        with ProcessPoolExecutor(n_workers, initializer=initializer, initargs=initargs) as pool:
+            inflight: dict = {}
+            broken = False
+            while pending or inflight:
+                while pending and not stopped and len(inflight) < 2 * n_workers:
+                    key, args = pending.pop()
+                    inflight[pool.submit(fn, *args)] = (key, args)
+                if not inflight:
+                    break
+                done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    item = inflight.pop(fut)
+                    try:
+                        result = fut.result()
+                    except BrokenProcessPool:
+                        broken = True
+                        suspects.append(item)
+                        continue
+                    except Exception as exc:
+                        on_result(item[0], None, f"{type(exc).__name__}: {exc}"[:300])
+                        continue
+                    on_result(item[0], result, None)
+                if broken:
+                    suspects.extend(inflight.values())
+                    break
+                if not stopped and should_stop():
+                    stopped = True  # stop submitting; finish and keep what is in flight
+    return stopped
+
+
 def update(settings: Settings, workers: int | None = None, log=print) -> dict:
-    with UpdateLock(settings.db_path) as got:
+    lock = UpdateLock(settings.db_path)
+    with lock as got:
         if not got:
             log("Another update is already running; skipped.")
             return {"skipped": True}
-        return _update(settings, workers, log)
+        if not settings.root.is_dir():
+            log(f"Folder not found or offline: {settings.root}. Its index is kept as it is.")
+            return {"skipped": True, "missing": True}
+        try:
+            return _update(settings, workers, log, lock)
+        except RootUnavailable as exc:
+            log(f"{exc}. Its index is kept as it is.")
+            return {"skipped": True, "missing": True}
+        finally:
+            try:
+                conn = connect(settings.db_path)
+                set_meta(conn, "progress", "")
+                conn.commit()
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
-def _update(settings: Settings, workers: int | None, log) -> dict:
+def _update(settings: Settings, workers: int | None, log, lock: UpdateLock) -> dict:
     t0 = time.time()
     conn = connect(settings.db_path)
     set_meta(conn, "root", settings.root)
@@ -262,6 +377,7 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
     def progress(phase: str, done: int = 0, total: int = 0) -> None:
         set_meta(conn, "progress", json.dumps({"phase": phase, "done": done, "total": total, "started": t0}))
         conn.commit()
+        lock.touch()
 
     progress("scanning")
     entries = scan(settings, skip)
@@ -300,8 +416,13 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
         conn.execute("INSERT INTO fts(rowid, name, path, content) VALUES (?,?,?,?)",
                      (rowid, e.name, e.rel.replace("/", " / "), text))
 
+    skipped = 0
     for i, e in enumerate(todo_meta, 1):
-        write(e, e.status)
+        try:
+            write(e, e.status)
+        except (sqlite3.Error, UnicodeError) as exc:
+            skipped += 1
+            log(f"  skipped {e.rel!r}: {exc}")
         if i % 2000 == 0:
             progress("listing", i, len(todo_meta))
     conn.commit()
@@ -311,22 +432,25 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
     if todo_content:
         n_workers = workers or max(1, min(8, (os.cpu_count() or 2) - 1))
         log(f"Extracting text from {len(todo_content):,} files with {n_workers} workers...")
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_extract_job, str(settings.root), e.rel, e.ext): e for e in todo_content}
-            for i, fut in enumerate(as_completed(futures), 1):
-                e = futures[fut]
-                try:
-                    _, text, sha1, err = fut.result()
-                    write(e, "error" if err else "content", text, sha1, err)
-                except Exception as exc:  # a crashed worker or an unstorable text: keep going
-                    err = f"{type(exc).__name__}: {exc}"[:300]
-                    write(e, "error", "", None, err)
-                if err:
-                    errors += 1
-                if i % 100 == 0:
-                    progress("reading", i, len(todo_content))
-                    if i % 500 == 0:
-                        log(f"  {i:,}/{len(todo_content):,}")
+        done = 0
+
+        def on_result(e: Entry, result, error) -> None:
+            nonlocal done, errors
+            done += 1
+            text, sha1, err = ("", None, error) if result is None else result[1:]
+            try:
+                write(e, "error" if err else "content", text, sha1, err)
+            except (sqlite3.Error, UnicodeError) as exc:  # an unstorable text: keep going
+                err = f"{type(exc).__name__}: {exc}"[:300]
+                write(e, "error", "", None, err)
+            errors += bool(err)
+            if done % 100 == 0:
+                progress("reading", done, len(todo_content))
+                if done % 500 == 0:
+                    log(f"  {done:,}/{len(todo_content):,}")
+
+        run_isolated(_extract_job, [(e, (str(settings.root), e.rel, e.ext)) for e in todo_content],
+                     n_workers, on_result)
         conn.commit()
 
     set_meta(conn, "last_update", time.time())
@@ -336,7 +460,7 @@ def _update(settings: Settings, workers: int | None, log) -> dict:
     conn.commit()
     conn.close()
     stats = {"files": len(entries), "changed": len(todo_meta) + len(todo_content),
-             "removed": len(gone), "errors": errors, "seconds": round(time.time() - t0, 1)}
+             "removed": len(gone), "errors": errors + skipped, "seconds": round(time.time() - t0, 1)}
     log(f"Done: {stats}")
     return stats
 
@@ -388,7 +512,7 @@ def auto_workers(mode: str) -> int:
     cpu = max(1, (os.cpu_count() or 2) - 1)
     ram = _free_ram_mb()
     by_ram = max(1, ram // WORKER_RAM_MB) if ram else cpu
-    return max(1, min(cpu, by_ram, 32))
+    return clamp_workers(min(cpu, by_ram))
 
 
 def _stop_path(db_path: Path) -> Path:
@@ -428,7 +552,7 @@ def set_ocr_speed(settings: Settings, mode: str, workers: int = 0) -> str:
     if not ocr_installed():
         return "OCR is not installed: pip install 'folder-index-mcp[ocr]'."
     set_ocr_paused(settings, False)
-    n = workers or auto_workers(mode)
+    n = clamp_workers(workers) if workers else auto_workers(mode)
     args = ["ocr", "--mode", mode, "--workers", str(n)]
     running = is_ocr_running(settings.db_path)
     if running:
@@ -498,90 +622,105 @@ def _ocr_worker_job(root: str, rel: str, ext: str, size: int, mtime: float):
 
 
 def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str = "background",
-            workers: int | None = None, takeover: bool = False) -> dict:
-    """Work through the OCR queue. takeover: stop a running pass first, then continue its queue."""
+            workers: int | None = None, takeover: bool = False, in_process: bool = False) -> dict:
+    """Work through the OCR queue. takeover: stop a running pass first, then continue its queue.
+    Each file is OCR'd in a worker process so a crash in a native library costs one file, not the
+    pass; in_process=True runs in this process instead (tests)."""
     if takeover:
         log("Asking the running OCR pass to stop...")
         if not stop_ocr(settings, wait=600):
             log("The running OCR pass did not stop; giving up.")
             return {"skipped": True}
     _stop_path(settings.db_path).unlink(missing_ok=True)
+    if not settings.db_path.exists():
+        return {"skipped": True}
     lock = UpdateLock(settings.db_path, ".ocr.lock")
     with lock as got:
         if not got:
             log("An OCR pass is already running; skipped.")
             return {"skipped": True}
+        conn = connect(settings.db_path)
+        if ocr_paused(conn):
+            conn.close()
+            log("OCR is paused for this folder; skipped.")
+            return {"skipped": True, "paused": True}
         from . import ocr
 
         try:
             engine = ocr.load_engine()
         except ocr.OcrUnavailable as exc:
+            conn.close()
             log(f"OCR unavailable: {exc}")
             return {"unavailable": str(exc)}
-        n = workers or auto_workers(mode)
+        n = clamp_workers(workers) if workers else auto_workers(mode)
         low = mode != "turbo"
         if low:
             _lower_priority()
         t0 = time.time()
-        conn = connect(settings.db_path)
-        set_meta(conn, "ocr_mode", f"{mode} x{n}")
-        conn.commit()
         rows = conn.execute(f"SELECT id, path, ext, size, mtime FROM files WHERE {OCR_WHERE} "
                             "ORDER BY mtime DESC").fetchall()[:limit]
-        set_meta(conn, "ocr_progress", json.dumps({"done": 0, "total": len(rows), "started": t0,
-                                                   "workers": n, "mode": mode}))
-        conn.commit()
-        log(f"OCR ({engine.name}, {mode}, {n} worker{'s' if n > 1 else ''}): "
-            f"{len(rows):,} files queued, newest first")
+        by_id = {r["id"]: r for r in rows}
         counts = {"done": 0, "empty": 0, "failed": 0}
-        stop_file = _stop_path(settings.db_path)
 
-        def save(r, result) -> None:
-            if result is None:
-                return
-            text, state = result
-            if text:
-                old = conn.execute("SELECT content FROM fts WHERE rowid = ?", (r["id"],)).fetchone()
-                prefix = old[0] + "\n\n" if old and old[0] else ""
-                merged = prefix + "[OCR]\n" + text
-                conn.execute("UPDATE fts SET content = ? WHERE rowid = ?", (merged, r["id"]))
-                conn.execute("UPDATE files SET chars = ?, ocr = ? WHERE id = ?", (len(merged), state, r["id"]))
-            else:
-                conn.execute("UPDATE files SET ocr = ? WHERE id = ?", (state, r["id"]))
-            counts[state.split(":")[0]] += 1
+        def progress() -> None:
             set_meta(conn, "ocr_progress", json.dumps({"done": sum(counts.values()), "total": len(rows),
                                                        "started": t0, "workers": n, "mode": mode}))
             conn.commit()
             lock.touch()
 
+        set_meta(conn, "ocr_mode", f"{mode} x{n}")
+        progress()
+        log(f"OCR ({engine.name}, {mode}, {n} worker{'s' if n > 1 else ''}): "
+            f"{len(rows):,} files queued, newest first")
+        stop_file = _stop_path(settings.db_path)
+        last_check = [0.0, False]
+
+        def should_stop() -> bool:
+            """A stop request (mode switch) or the folder being paused, checked every second."""
+            if stop_file.exists():
+                return True
+            if time.time() - last_check[0] > 1:
+                last_check[:] = [time.time(), ocr_paused(conn)]
+            return last_check[1]
+
+        def save(row_id: int, result, error) -> None:
+            r = by_id[row_id]
+            if error:
+                result = ("", f"failed: {error}"[:300])
+            if result is None:
+                return  # the file changed since indexing; the next update re-queues it
+            current = conn.execute("SELECT path, mtime FROM files WHERE id = ?", (row_id,)).fetchone()
+            if not current or current["path"] != r["path"] or abs(current["mtime"] - r["mtime"]) > 1e-3:
+                return  # the row was replaced or the file re-indexed meanwhile
+            text, state = result
+            if text:
+                old = conn.execute("SELECT content FROM fts WHERE rowid = ?", (row_id,)).fetchone()
+                prefix = old[0] + "\n\n" if old and old[0] else ""
+                merged = prefix + "[OCR]\n" + text
+                conn.execute("UPDATE fts SET content = ? WHERE rowid = ?", (merged, row_id))
+                conn.execute("UPDATE files SET chars = ?, ocr = ? WHERE id = ?", (len(merged), state, row_id))
+            else:
+                conn.execute("UPDATE files SET ocr = ? WHERE id = ?", (state, row_id))
+            counts[state.split(":")[0]] += 1
+            progress()
+            total = sum(counts.values())
+            if total % 100 == 0:
+                log(f"  OCR {total:,}/{len(rows):,} ({total / (time.time() - t0):.1f} files/s)")
+
         def job_args(r):
             return str(settings.root), r["path"], r["ext"], r["size"], r["mtime"]
 
-        stopped = False
-        if n == 1:
-            for i, r in enumerate(rows, 1):
-                if stop_file.exists():
+        if in_process:
+            stopped = False
+            for r in rows:
+                if should_stop():
                     stopped = True
                     break
-                save(r, _ocr_one(engine, *job_args(r)))
-                if i % 50 == 0:
-                    log(f"  OCR {i:,}/{len(rows):,}")
+                save(r["id"], _ocr_one(engine, *job_args(r)), None)
         else:
             del engine  # each worker process loads its own
-            with ProcessPoolExecutor(max_workers=n, initializer=_ocr_worker_init, initargs=(low,)) as pool:
-                futures = {pool.submit(_ocr_worker_job, *job_args(r)): r for r in rows}
-                for i, fut in enumerate(as_completed(futures), 1):
-                    try:
-                        result = fut.result()
-                    except Exception as exc:  # a worker crashed on this file
-                        result = ("", f"failed: {type(exc).__name__}: {exc}"[:300])
-                    save(futures[fut], result)
-                    if i % 100 == 0:
-                        log(f"  OCR {i:,}/{len(rows):,} ({i / (time.time() - t0):.1f} files/s)")
-                    if stop_file.exists():
-                        stopped = True
-                        pool.shutdown(wait=True, cancel_futures=True)
-                        break
+            stopped = run_isolated(_ocr_worker_job, [(r["id"], job_args(r)) for r in rows], n, save,
+                                   should_stop, initializer=_ocr_worker_init, initargs=(low,))
         set_meta(conn, "ocr_mode", "")
         set_meta(conn, "ocr_progress", "")
         conn.commit()
@@ -591,6 +730,28 @@ def run_ocr(settings: Settings, log=print, limit: int | None = None, mode: str =
         log(f"OCR {'stopped' if stopped else 'done'}: {stats}")
         return stats
 
+
+def delete_index(settings: Settings) -> str | None:
+    """Delete a folder's index files. Returns None on success, else why it could not (yet)."""
+    if is_updating(settings.db_path):
+        return "an update of this folder is running; try again when it finishes"
+    if not stop_ocr(settings, wait=15):
+        return "the OCR pass of this folder did not stop; try again in a moment"
+    leftovers = []
+    for suffix in (".db", ".db-wal", ".db-shm", ".log", ".lock", ".ocr.lock", ".ocr.stop"):
+        path = settings.db_path.with_suffix(suffix)
+        for attempt in range(20):
+            try:
+                path.unlink(missing_ok=True)
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            leftovers.append(str(path))
+    if leftovers:
+        config.remember_pending_delete(leftovers)
+        return "some index files are still open; they will be deleted on the next start"
+    return None
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit("Use the `folder-index` command.")
