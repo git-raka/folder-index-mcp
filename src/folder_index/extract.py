@@ -131,6 +131,8 @@ def extract(path: Path, ext: str) -> str:
         text = _ooxml(path, ext)
     elif ext in config.ARCHIVE_EXTS:
         text = _archive_listing(path)
+    elif ext in config.OCR_IMAGE_EXTS:
+        return ""  # no text layer; the OCR pass fills it in
     else:
         text = _plain(path)
     return _clean(text)

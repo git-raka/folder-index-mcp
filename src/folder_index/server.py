@@ -3,9 +3,6 @@ subprocess, so a long rebuild never blocks or corrupts the stdio channel."""
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 import time
 from contextlib import closing
 
@@ -18,17 +15,10 @@ AUTO_REFRESH_AFTER = 15 * 60  # seconds since the last update
 
 
 def spawn_update(settings: Settings) -> bool:
+    """Background `update`; it chains into a background OCR pass when scans are queued."""
     if indexer.is_updating(settings.db_path):
         return False
-    log = open(settings.db_path.with_suffix(".log"), "a", encoding="utf-8")
-    flags = 0
-    if os.name == "nt":
-        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen(
-        [sys.executable, "-m", "folder_index.cli", "update", "--root", str(settings.root),
-         "--db", str(settings.db_path)],
-        stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags, close_fds=True,
-    )
+    indexer.spawn(settings, "update")
     return True
 
 
@@ -90,13 +80,14 @@ def build(settings: Settings, auto_refresh: bool = True) -> MCPServer:
 
     @mcp.tool()
     def index_status() -> str:
-        """Root folder, file counts, last update time and whether an update is running."""
+        """Root folder, file counts, last update, and update/OCR progress."""
         with db() as conn:
             return query.status(conn, settings.db_path)
 
     @mcp.tool()
     def refresh_index() -> str:
-        """Start an incremental re-index in the background (only new/changed files are read)."""
+        """Start an incremental re-index in the background (only new/changed files are read).
+        Scanned PDFs and images found along the way are OCR'd afterwards, also in the background."""
         if spawn_update(settings):
             return "Re-index started in the background; results update as it progresses."
         return "A re-index is already running."

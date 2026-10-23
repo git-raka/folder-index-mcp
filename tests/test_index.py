@@ -63,3 +63,25 @@ def test_incremental_update_and_duplicates(tmp_path):
     indexer.update(s, workers=1, log=lambda m: None)
     with closing(indexer.connect(s.db_path, readonly=True)) as conn:
         assert "2 copies" in query.duplicates(conn)
+
+
+def test_scanned_pdf_is_ocrd(tmp_path, monkeypatch):
+    from pypdf import PdfWriter
+
+    from folder_index import ocr
+
+    s = build(tmp_path)
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)  # no text layer, like a scan
+    with open(s.root / "docs" / "scan.pdf", "wb") as f:
+        w.write(f)
+    indexer.update(s, workers=1, log=lambda m: None)
+
+    monkeypatch.setattr(ocr, "load_engine", lambda: type("Fake", (), {"name": "fake"})())
+    monkeypatch.setattr(ocr, "ocr_file", lambda engine, path, ext: "Scanned invoice number 4711")
+    stats = indexer.run_ocr(s, log=lambda m: None)
+    assert stats["done"] == 1
+    with closing(indexer.connect(s.db_path, readonly=True)) as conn:
+        assert "docs/scan.pdf" in query.search(conn, "invoice 4711")
+        assert "[OCR]" in query.read_text(conn, "docs/scan.pdf")
+    assert indexer.run_ocr(s, log=lambda m: None)["done"] == 0  # nothing left in the queue

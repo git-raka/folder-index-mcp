@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> None:
 
     up = sub.add_parser("update", help="build or incrementally refresh the index")
     up.add_argument("--workers", type=int, default=None)
+    up.add_argument("--no-ocr", action="store_true", help="don't start the background OCR pass")
+    oc = sub.add_parser("ocr", help="OCR scanned PDFs and images now (foreground)")
+    oc.add_argument("--limit", type=int, default=None)
     sv = sub.add_parser("serve", help="run the MCP server on stdio")
     sv.add_argument("--no-auto-refresh", action="store_true")
     se = sub.add_parser("search", help="full-text search")
@@ -42,8 +45,14 @@ def main(argv: list[str] | None = None) -> None:
         from .server import serve
         serve(settings, auto_refresh=not a.no_auto_refresh)
         return
+    log = lambda m: print(m, flush=True)  # noqa: E731
     if a.cmd == "update":
-        indexer.update(settings, a.workers, log=lambda m: print(m, flush=True))
+        stats = indexer.update(settings, a.workers, log=log)
+        if not a.no_ocr and not stats.get("skipped"):
+            indexer.spawn_ocr_if_pending(settings, log=log)
+        return
+    if a.cmd == "ocr":
+        indexer.run_ocr(settings, log=log, limit=a.limit)
         return
 
     if not settings.db_path.exists():

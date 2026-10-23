@@ -171,10 +171,22 @@ def status(conn: sqlite3.Connection, db_path: Path) -> str:
         f"Index: {db_path} ({_human(db_path.stat().st_size) if db_path.exists() else '?'})",
         f"Last update: {datetime.fromtimestamp(last):%Y-%m-%d %H:%M}" if last else "Last update: never",
         f"Update running now: {'yes' if indexer.is_updating(db_path) else 'no'}",
+        _ocr_line(conn, db_path),
         f"Files: {total:,} — " + ", ".join(f"{r['status']} {r['n']:,}" for r in rows),
         "By kind: " + ", ".join(f"{r['kind']} {r['n']:,}" for r in kinds),
     ]
     return "\n".join(lines)
+
+
+def _ocr_line(conn: sqlite3.Connection, db_path: Path) -> str:
+    pending = conn.execute(f"SELECT count(*) FROM files WHERE {indexer.OCR_WHERE}").fetchone()[0]
+    rows = dict(conn.execute("SELECT CASE WHEN ocr LIKE 'failed%' THEN 'failed' ELSE ocr END, count(*) "
+                             "FROM files WHERE ocr IS NOT NULL GROUP BY 1").fetchall())
+    if not pending and not rows:
+        return "OCR: nothing queued" + ("" if indexer.ocr_installed() else " (OCR extra not installed)")
+    running = "running" if indexer.is_ocr_running(db_path) else "idle"
+    done = ", ".join(f"{k} {v:,}" for k, v in sorted(rows.items()))
+    return f"OCR ({running}): {pending:,} pending" + (f", {done}" if done else "")
 
 
 def _staleness(conn: sqlite3.Connection) -> str:

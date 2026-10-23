@@ -60,6 +60,13 @@ MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_CHARS = 60_000
 MAX_PDF_PAGES = 60
 
+# OCR (optional extra): PDFs with less text than this are treated as scans
+OCR_MIN_CHARS = 100
+MAX_OCR_PAGES = 30
+OCR_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
+MIN_OCR_IMAGE_BYTES = 30 * 1024      # skip icons and thumbnails
+MAX_OCR_IMAGE_BYTES = 25 * 1024 * 1024
+
 IGNORE_FILE = ".folderindexignore"
 
 
